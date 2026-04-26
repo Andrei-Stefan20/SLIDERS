@@ -1,0 +1,51 @@
+# Data
+data/raw/
+data/processed/
+data/splits/
+
+# Outputs
+outputs/
+/models/
+
+# Checkpoints
+*.pt
+*.pth
+
+# Embeddings and index
+*.npy
+*.npz
+*.faiss
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Virtual env
+venv/
+.venv/
+.env/
+
+# Environment variables
+.env
+
+# Local agent/editor state
+.claude/
+
+# MacOS
+.DS_Store
+
+# Jupyter
+
+# Temp
+*.tmp
+*.zip
+.pytest_env_tmp/
+.pytest_tmp*/
+pytest-cache-files-*/
+tmp/

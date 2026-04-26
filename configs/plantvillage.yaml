@@ -1,0 +1,27 @@
+dataset:
+  name: plantvillage_train       # prefix for output files, e.g. plantvillage_train_embeddings.npy
+  path: data/raw/plantvillage/PlantVillage/train  # root folder passed to ImageFolder
+  batch_size: 64                 # DINOv2 extraction batch size
+  adapter: plantvillage          # dataset adapter: plantvillage or generic
+
+encoder:
+  use_patches: false             # NOT SUPPORTED for corpus extraction - setting true produces (N, 256, 1024)
+                                 # which breaks SAE training, build_index and the UI
+
+sae:
+  hidden_dim: 8192               # number of SAE features, 8x expansion over the 1024-d DINOv2 embedding
+  lambda_sparsity: 0.001         # L1 weight, only used when topk is 0 (ReLU mode)
+  lr: 0.0003                     # Adam learning rate
+  epochs: 50                     # max training epochs, early stopping may cut this short
+  batch_size: 512                # SAE training batch size
+
+retrieval:
+  n_sliders: 20                  # how many feature axes are shown in the UI
+
+naming:
+  n_features: 20                 # number of features to name
+  n_crops: 8                     # high and low activation images sent to the VLM per feature
+  crop_size: 96                  # pixel size of each localized crop
+  ranking: diverse_mmr           # feature selection mode: variance, diverse_mmr, sparsity, selectivity
+  lambda_mmr: 0.5                # MMR balance: 1.0 = pure relevance, 0.0 = pure diversity
+  vlm_model: Qwen/Qwen3-VL-4B-Instruct  # HuggingFace model id for feature naming

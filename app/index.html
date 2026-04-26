@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SLIDERS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body data-panel="open" data-status="idle">
+  <header id="topbar">
+    <div class="topbar-left">
+      <span class="brand-name">SLIDERS</span>
+    </div>
+
+    <div class="topbar-results">
+      <span class="micro dim">Found</span>
+      <span id="meta-results" class="mono stat-value">-</span>
+    </div>
+  </header>
+
+  <main id="workspace">
+    <aside id="control-panel" aria-label="Controls">
+      <div class="panel-scroll">
+        <section class="panel-section panel-section-query">
+          <div class="section-header">
+            <span class="micro dim">01</span>
+            <span class="section-title">Query</span>
+          </div>
+
+          <div id="upload-zone" class="upload-zone" tabindex="0" role="button" aria-label="Upload image">
+            <input type="file" id="file-input" accept="image/*" hidden>
+            <div id="upload-empty" class="upload-empty">
+              <div class="upload-empty-icon">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                  <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                  <polyline points="21 15 16 10 5 21"></polyline>
+                </svg>
+              </div>
+              <span class="micro-strong">Drag an image here</span>
+              <span class="upload-empty-copy">or click to select one</span>
+            </div>
+            <div id="upload-loaded" class="upload-loaded" hidden>
+              <img id="query-img" alt="Query image">
+              <div class="upload-overlay">
+                <span class="chip-badge micro">Query</span>
+                <span class="micro dim upload-overlay-copy">click to replace</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <button id="reset-all-btn" class="link-reset" disabled>Reset all axes</button>
+        </section>
+
+        <section class="panel-section panel-section-features">
+          <div class="section-header">
+            <span class="micro dim">02</span>
+            <span class="section-title">Steering axes</span>
+            <span id="feature-count" class="micro dim mono">0</span>
+          </div>
+
+          <div id="feature-list" class="feature-list"></div>
+        </section>
+      </div>
+    </aside>
+
+    <button id="panel-toggle" class="panel-toggle" aria-label="Collapse panel" title="Collapse panel">
+      <span id="panel-toggle-icon" aria-hidden="true">&lt;</span>
+    </button>
+
+    <section id="canvas">
+      <div id="empty-state" class="canvas-state">
+        <div class="empty-copy" aria-hidden="true"></div>
+      </div>
+
+      <div id="loading-state" class="canvas-state" hidden>
+        <div class="spinner"></div>
+      </div>
+
+      <div id="image-grid" class="image-grid" hidden></div>
+    </section>
+  </main>
+
+  <div id="result-viewer" class="result-viewer" hidden aria-hidden="true">
+    <div id="result-viewer-backdrop" class="result-viewer-backdrop"></div>
+    <div class="result-viewer-shell" role="dialog" aria-modal="true" aria-labelledby="result-viewer-title">
+      <button id="result-viewer-close" class="result-viewer-close" aria-label="Close viewer">×</button>
+
+      <button id="result-viewer-prev" class="result-viewer-nav prev" aria-label="Previous image">‹</button>
+      <button id="result-viewer-next" class="result-viewer-nav next" aria-label="Next image">›</button>
+
+      <div class="result-viewer-media">
+        <img id="result-viewer-image" alt="Retrieved image">
+      </div>
+
+      <div class="result-viewer-bar">
+        <div class="result-viewer-meta">
+          <span class="micro dim">Result</span>
+          <span id="result-viewer-title" class="micro-strong">R01</span>
+          <span class="footer-divider"></span>
+          <span class="micro dim">Path</span>
+          <span id="result-viewer-path" class="result-viewer-path"></span>
+        </div>
+
+        <div class="result-viewer-actions">
+          <button id="result-viewer-copy-path" class="viewer-action">Copy path</button>
+          <a id="result-viewer-download" class="viewer-action" download="slider-result.jpg">Download</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="feature-modal" class="feature-modal" hidden aria-hidden="true">
+    <div id="feature-modal-backdrop" class="feature-modal-backdrop"></div>
+    <div class="feature-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="feature-modal-title">
+      <div class="feature-modal-head">
+        <div class="feature-modal-copy">
+          <span class="micro dim">Feature detail</span>
+          <h2 id="feature-modal-title">Feature</h2>
+          <p id="feature-modal-description" class="feature-modal-description"></p>
+        </div>
+        <button id="feature-modal-close" class="feature-modal-close" aria-label="Close feature detail">×</button>
+      </div>
+
+      <div id="feature-modal-body" class="feature-modal-body">
+        <section class="feature-modal-section">
+          <div class="feature-modal-section-head">
+            <span class="section-title">Most Present</span>
+            <span class="micro dim">highest feature values</span>
+          </div>
+          <div id="feature-modal-high" class="feature-example-grid"></div>
+        </section>
+
+        <section class="feature-modal-section">
+          <div class="feature-modal-section-head">
+            <span class="section-title">Least Present</span>
+            <span class="micro dim">lowest feature values</span>
+          </div>
+          <div id="feature-modal-low" class="feature-example-grid"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

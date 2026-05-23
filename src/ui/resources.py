@@ -65,6 +65,13 @@ def _previews_from_activations(activations, image_paths, feature_ids):
     return top, bottom
 
 
+def _discover_processed(processed_dir, suffix):
+    candidates = sorted(processed_dir.glob(f"*{suffix}"))
+    if candidates:
+        return candidates[0]
+    return None
+
+
 def load_resources(
     index_path,
     sae_path,
@@ -77,6 +84,15 @@ def load_resources(
     if dataset is not None:
         embeddings_path = Path(f"data/processed/{dataset}_embeddings.npy")
         image_paths_json = Path(f"data/processed/{dataset}_image_paths.json")
+    else:
+        proc_dir = Path("data/processed")
+        if not embeddings_path.exists():
+            discovered = _discover_processed(proc_dir, "_embeddings.npy")
+            if discovered:
+                embeddings_path = discovered
+                stem = discovered.stem.replace("_embeddings", "")
+                image_paths_json = proc_dir / f"{stem}_image_paths.json"
+                logger.warning(f"Auto-discovered embeddings: {embeddings_path}")
 
     adapter_name = adapter_name or dataset or "generic"
     adapter = get_adapter(adapter_name)

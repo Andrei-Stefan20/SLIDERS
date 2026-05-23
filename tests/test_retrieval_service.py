@@ -8,7 +8,7 @@ import pytest
 import torch
 from PIL import Image
 
-from src.ui.retrieval_service import RetrievalService
+from src.ui.retrieval_service import RetrievalService, SearchResult
 from src.ui.state import AppState
 
 
@@ -70,7 +70,8 @@ class TestRetrieve:
         assert isinstance(results, list)
         assert len(results) <= 5
         for r in results:
-            assert isinstance(r, Image.Image)
+            assert isinstance(r, SearchResult)
+            assert isinstance(r.image, Image.Image)
 
     def test_returns_empty_for_zero_sliders(self, service, input_dim):
         query_emb = np.random.randn(input_dim).astype(np.float32)

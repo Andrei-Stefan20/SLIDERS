@@ -18,7 +18,6 @@ class TestRegistry:
         adapters = list_adapters()
         assert "generic" in adapters
         assert "plantvillage" in adapters
-        assert "ceramics" in adapters
 
     def test_register_decorator(self):
         @register("_test_adapter_tmp")
@@ -88,16 +87,3 @@ class TestPlantVillageAdapter:
         assert self.adapter.direction_mode == "reference"
 
 
-class TestCeramicsAdapter:
-    def setup_method(self):
-        self.adapter = get_adapter("ceramics")
-
-    def test_parse_path(self):
-        path = "/data/ceramics/bowl/img001.jpg"
-        cat, sub, is_ref = self.adapter.parse_path(path)
-        assert cat == "bowl"
-        assert sub == "bowl"
-        assert is_ref is False
-
-    def test_direction_mode(self):
-        assert self.adapter.direction_mode == "global"

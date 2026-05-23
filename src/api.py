@@ -158,8 +158,8 @@ async def retrieve(req: RetrieveRequest):
     emb  = np.array(req.embedding, dtype=np.float32)
     imgs = service.retrieve(emb, req.sliders, k=req.k)
     items = []
-    for img in imgs:
-        path = getattr(img, "filename", "") or ""
+    for result in imgs:
+        path = result.path
         class_name = ""
         if path:
             try:
@@ -168,8 +168,8 @@ async def retrieve(req: RetrieveRequest):
             except ValueError:
                 class_name = ""
         items.append({
-            "image": _to_b64(img, size=240, quality=82),
-            "download": _to_b64(img, size=0, quality=92),
+            "image": _to_b64(result.image, size=240, quality=82),
+            "download": _to_b64(result.image, size=0, quality=92),
             "path": path,
             "class_name": class_name,
         })

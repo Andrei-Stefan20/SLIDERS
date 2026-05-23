@@ -1,4 +1,5 @@
 from collections import Counter
+from dataclasses import dataclass
 
 import numpy as np
 from PIL import Image
@@ -10,6 +11,12 @@ from src.utils.io import normalize_embeddings
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class SearchResult:
+    image: Image.Image
+    path: str
 
 
 class RetrievalService:
@@ -91,7 +98,7 @@ class RetrievalService:
         slider_values: list[float],
         mmr_lambda: float = 0.7,
         k: int = 20,
-    ) -> list[Image.Image]:
+    ) -> list[SearchResult]:
         """Retrieve images by steering query_emb along sliders and running FAISS search.
 
         Args:
@@ -101,7 +108,7 @@ class RetrievalService:
             k: Number of results.
 
         Returns:
-            List of PIL images.
+            List of SearchResult objects.
         """
         state = self._state
 
@@ -143,14 +150,13 @@ class RetrievalService:
 
         distances, indices = self._filter_to_class(distances, indices, majority_class, k)
 
-        results: list[Image.Image] = []
+        results: list[SearchResult] = []
         for idx in indices:
             if 0 <= idx < len(state.image_paths):
                 try:
                     path = state.image_paths[idx]
                     image = Image.open(path).convert("RGB")
-                    setattr(image, "filename", path)
-                    results.append(image)
+                    results.append(SearchResult(image=image, path=path))
                 except Exception as e:
                     logger.warning(f"Could not load image {state.image_paths[idx]}: {e}")
         return results

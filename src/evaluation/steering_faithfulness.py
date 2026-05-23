@@ -1,5 +1,3 @@
-"""Measures whether steering sliders actually shift retrieval results in the expected direction."""
-
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,7 +17,6 @@ def steering_faithfulness(
     k: int = 20,
     n_queries: int = 100,
 ) -> float:
-    """Returns mean_steered_activation / corpus_mean_activation. Above 1.0 means steering works."""
     from src.retrieval.query import search_with_sliders
 
     corpus_mean = float(corpus_activations[:, feature_id].mean())
@@ -49,7 +46,6 @@ def direction_steering_faithfulness(
     k: int = 20,
     n_queries: int = 100,
 ) -> float:
-    """Same as steering_faithfulness but for difference-in-means directions instead of SAE features."""
     from src.retrieval.query import search_with_direction_sliders
 
     d = directions[direction_idx]
@@ -84,7 +80,6 @@ def batch_steering_faithfulness(
     k: int = 20,
     n_queries: int = 100,
 ) -> dict[int, float]:
-    """Compute steering faithfulness for multiple features."""
     return {
         fid: steering_faithfulness(
             sae, index, corpus_activations, query_embs, fid, alpha, k, n_queries

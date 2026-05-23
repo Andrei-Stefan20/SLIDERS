@@ -1,24 +1,3 @@
-"""CLI script for evaluating retrieval quality.
-
-Metrics computed:
-  - Recall@K      — same-class ground truth (measures backbone quality)
-  - CLIP alignment — how well feature names describe top-activating images
-  - Steering faithfulness — whether sliders actually shift feature activations
-  - Direction faithfulness — same check for class-direction sliders
-  - Monosemanticity — class purity of each SAE feature's top images
-  - SAE vs PCA ablation — whether SAE adds value over linear decomposition
-  - Cross-model alignment — name validation with a different CLIP model
-  - Reverse retrieval — use name as text query, measure image overlap
-
-Usage:
-    python scripts/evaluate.py \\
-        --embeddings data/processed/plantvillage_embeddings.npy \\
-        --image-paths data/processed/plantvillage_image_paths.json \\
-        --index data/processed/index.faiss \\
-        --sae-model models/sae_best.pt \\
-        --feature-names models/feature_names.json
-"""
-
 # ruff: noqa: E402
 
 import argparse
@@ -38,26 +17,25 @@ from src.evaluation.ablation import evaluate_sae_vs_pca
 from src.evaluation.clip_alignment import batch_clip_alignment
 from src.evaluation.cross_model_alignment import batch_cross_validation
 from src.evaluation.monosemanticity import batch_monosemanticity, mean_purity
-from src.evaluation.recall_at_k import mean_recall_at_k
+from src.evaluation.recall_at_k import mean_average_precision, mean_precision_at_k, mean_recall_at_k
+from src.evaluation.retrieval_comparison import compare_retrieval_methods, print_comparison_table
 from src.evaluation.steering_faithfulness import (
     batch_steering_faithfulness,
     direction_steering_faithfulness,
 )
+from src.evaluation.steering_isotonicity import batch_steering_isotonicity
+from src.evaluation.targeted_recall import batch_targeted_recall
 from src.models.sae import SparseAutoencoder
 from src.naming.feature_namer import get_top_images, rank_features_by_variance
 from src.retrieval.index import load_index
 from src.retrieval.query import search
 from src.utils.io import normalize_embeddings
-from src.utils.logging import get_logger, setup_logging
+from src.utils.logging import setup_logging
 
-logger = get_logger(__name__)
-
-# k-values used exclusively for Recall@K — independent of --top-k
 RECALL_KS = [1, 5, 10]
 
 
 def build_same_class_ground_truth(image_paths: list[str]) -> list[list[int]]:
-    """For each image, return the indices of all other images in the same class directory."""
     labels = [PurePath(p).parent.name for p in image_paths]
     label_to_indices: dict[str, list[int]] = {}
     for i, label in enumerate(labels):
@@ -117,6 +95,27 @@ def main() -> None:
         help="Skip SAE steering faithfulness (slow for large corpora).",
     )
     parser.add_argument(
+        "--skip-isotonicity",
+        action="store_true",
+        help="Skip steering isotonicity (tests monotone controllability of sliders).",
+    )
+    parser.add_argument(
+        "--skip-targeted-recall",
+        action="store_true",
+        help="Skip targeted class delta-Recall@K (tests whether sliders improve class retrieval).",
+    )
+    parser.add_argument(
+        "--skip-comparison",
+        action="store_true",
+        help="Skip retrieval method comparison (Unsteered vs PCA vs SAE, with P@K and mAP).",
+    )
+    parser.add_argument(
+        "--comparison-queries",
+        type=int,
+        default=200,
+        help="Number of queries for the retrieval comparison.",
+    )
+    parser.add_argument(
         "--skip-ablation",
         action="store_true",
         help="Skip SAE vs PCA ablation (slow).",
@@ -142,9 +141,7 @@ def main() -> None:
 
     norm_embs = normalize_embeddings(embeddings)
 
-    # --- Recall@K -------------------------------------------------------
-    # Search depth is always max(RECALL_KS) regardless of --top-k.
-    print("\n=== Recall@K ===")
+    print("\n=== Recall@K / Precision@K / mAP (unsteered baseline) ===")
     ground_truth = build_same_class_ground_truth(image_paths)
     recall_depth = max(RECALL_KS)
     results = []
@@ -154,10 +151,12 @@ def main() -> None:
         retrieved_filtered = retrieved[mask][:recall_depth].tolist()
         results.append({"retrieved": retrieved_filtered, "relevant": ground_truth[i]})
     recall = mean_recall_at_k(results, k_values=RECALL_KS)
-    for k, v in recall.items():
-        print(f"  {k}: {v:.4f}")
+    precision = mean_precision_at_k(results, k_values=RECALL_KS)
+    map_score = mean_average_precision(results, k=recall_depth)
+    for k in RECALL_KS:
+        print(f"  recall@{k}: {recall[f'recall@{k}']:.4f}   precision@{k}: {precision[f'precision@{k}']:.4f}")
+    print(f"  mAP@{recall_depth}: {map_score:.4f}")
 
-    # --- SAE activations ------------------------------------------------
     print("\nComputing SAE activations...")
     all_acts = []
     with torch.no_grad():
@@ -168,7 +167,6 @@ def main() -> None:
 
     ranked = rank_features_by_variance(activations)[: args.n_align_features]
 
-    # --- Monosemanticity ------------------------------------------------
     print("\n=== Monosemanticity ===")
     mono_scores = batch_monosemanticity(activations, image_paths, ranked, k=args.top_k)
     for m in sorted(mono_scores, key=lambda x: -x["purity_score"])[:10]:
@@ -176,9 +174,42 @@ def main() -> None:
               f"dominant={m['dominant_class'][:30]:30s}  ({m['dominant_class_fraction']:.0%})")
     print(f"  Mean purity: {mean_purity(mono_scores):.4f}")
 
-    # Shared query sample — needed by faithfulness, ablation, and direction faithfulness.
+    if not args.skip_comparison:
+        print("\n=== Retrieval Method Comparison ===")
+        rng_cmp = np.random.default_rng(1)
+        cmp_indices = rng_cmp.choice(
+            len(norm_embs),
+            size=min(args.comparison_queries, len(norm_embs)),
+            replace=False,
+        ).tolist()
+        comparison = compare_retrieval_methods(
+            index, norm_embs, image_paths, sae, activations,
+            query_indices=cmp_indices,
+            k_values=(5, 10),
+            steer_alpha=args.faithfulness_alpha,
+        )
+        print_comparison_table(comparison)
+
+    if not args.skip_targeted_recall:
+        print("\n=== Targeted Class Delta-Recall@K ===")
+        targeted_results = batch_targeted_recall(
+            sae, index, activations, norm_embs, image_paths,
+            mono_scores, alpha=args.faithfulness_alpha,
+            k=args.top_k, n_queries=args.faithfulness_queries,
+        )
+        for r in sorted(targeted_results, key=lambda x: -x["delta_recall"]):
+            sign = "+" if r["delta_recall"] >= 0 else ""
+            print(f"  [{r['feature_id']:5d}]  class={r['dominant_class'][:30]:30s}  "
+                  f"base={r['baseline_recall']:.3f}  "
+                  f"steered={r['steered_recall']:.3f}  "
+                  f"delta={sign}{r['delta_recall']:.3f}")
+        mean_delta = float(np.mean([r["delta_recall"] for r in targeted_results]))
+        print(f"  Mean delta-Recall@{args.top_k}: {'+' if mean_delta >= 0 else ''}{mean_delta:.4f}  "
+              f"(>0 = slider helps find the right class)")
+
     need_queries = (
         not args.skip_faithfulness
+        or not args.skip_isotonicity
         or not args.skip_ablation
         or args.class_directions is not None
     )
@@ -192,7 +223,6 @@ def main() -> None:
         )
         query_sample = norm_embs[sample_idx]
 
-    # --- Steering Faithfulness ------------------------------------------
     if not args.skip_faithfulness:
         print("\n=== Steering Faithfulness ===")
         faith_scores = batch_steering_faithfulness(
@@ -206,8 +236,19 @@ def main() -> None:
         print(f"  Mean faithfulness: {np.mean(list(faith_scores.values())):.4f}  "
               f"(>1.0 = steering works, ≈1.0 = no effect)")
 
-    # --- SAE vs PCA Ablation --------------------------------------------
-    # Independent of --skip-faithfulness: ablation can run on its own.
+    if not args.skip_isotonicity:
+        print("\n=== Steering Isotonicity ===")
+        iso_results = batch_steering_isotonicity(
+            sae, index, activations, query_sample,
+            ranked, k=args.top_k, n_queries=min(50, args.faithfulness_queries),
+        )
+        for r in sorted(iso_results, key=lambda x: x["spearman_rho"]):
+            bar = "OK" if r["spearman_rho"] >= 0.7 else "!!"
+            print(f"  [{r['feature_id']:5d}]  isotonicity_rho={r['spearman_rho']:.3f}  [{bar}]")
+        mean_rho = float(np.mean([r["spearman_rho"] for r in iso_results]))
+        print(f"  Mean isotonicity rho: {mean_rho:.4f}  "
+              f"(1.0 = perfectly monotone, <0.7 = unreliable slider)")
+
     if not args.skip_ablation:
         print("\n=== SAE vs PCA Ablation ===")
         ablation = evaluate_sae_vs_pca(
@@ -222,7 +263,6 @@ def main() -> None:
         if ablation["improvement_ratio"] < 1.1:
             print("  WARNING: SAE barely outperforms PCA — consider longer training.")
 
-    # --- Direction Steering Faithfulness --------------------------------
     if args.class_directions is not None:
         print("\n=== Direction Steering Faithfulness ===")
         directions = np.load(args.class_directions).astype(np.float32)
@@ -239,7 +279,6 @@ def main() -> None:
         print(f"  Mean direction faithfulness: {float(np.mean(dir_scores)):.4f}  "
               f"(>1.0 = directions steer retrieval)")
 
-    # --- CLIP Alignment / Cross-Model / Reverse Retrieval ---------------
     if args.feature_names is not None:
         print("\n=== CLIP Alignment ===")
         feature_names_map: dict = json.loads(args.feature_names.read_text())

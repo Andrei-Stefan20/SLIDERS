@@ -6,10 +6,17 @@ from typing import cast
 
 import numpy as np
 import torch
+import torchvision.transforms as T
 from PIL import Image
 
 from src.encoders.dino_encoder import DINO_TRANSFORM, DINOEncoder
 from src.models.sae import SparseAutoencoder
+
+_GEOM_TRANSFORM = T.Compose([T.Resize(256), T.CenterCrop(224)])
+
+
+def _aligned_224(img: Image.Image) -> Image.Image:
+    return cast(Image.Image, _GEOM_TRANSFORM(img))
 
 
 def localize_feature(
@@ -19,23 +26,15 @@ def localize_feature(
     feature_id: int,
     crop_size: int = 96,
 ) -> tuple[Image.Image, tuple[int, int, int, int]]:
-    """Find the region where a feature is most active and crop it.
+    if not dino.use_patches:
+        raise ValueError("localize_feature requires DINOEncoder(use_patches=True)")
 
-    Extracts DINOv2 patch tokens (16x16 grid), applies SAE encoder, finds
-    the patch with the highest activation on feature_id, and crops a window
-    of crop_size pixels centered on that patch.
-
-    Returns:
-        Tuple (cropped PIL image, bbox (x1, y1, x2, y2) in 224x224 coords).
-    """
     img = Image.open(image_path).convert("RGB")
     img_tensor = cast(torch.Tensor, DINO_TRANSFORM(img)).unsqueeze(0)
 
     with torch.no_grad():
-        patch_tokens = dino.encode(img_tensor)  # (1, N_patches, D)
-
-    with torch.no_grad():
-        patch_acts = sae.encode(patch_tokens.squeeze(0))  # (N_patches, hidden_dim)
+        patch_tokens = dino.encode(img_tensor)
+        patch_acts = sae.encode(patch_tokens.squeeze(0))
 
     feat_acts = patch_acts[:, feature_id].numpy()
     best_patch_idx = int(np.argmax(feat_acts))
@@ -54,8 +53,8 @@ def localize_feature(
     x2 = min(224, center_x + half)
     y2 = min(224, center_y + half)
 
-    img_224 = img.resize((224, 224))
-    crop = img_224.crop((x1, y1, x2, y2))
+    img_aligned = _aligned_224(img)
+    crop = img_aligned.crop((x1, y1, x2, y2))
     return crop, (x1, y1, x2, y2)
 
 
@@ -66,7 +65,6 @@ def localize_feature_batch(
     feature_id: int,
     crop_size: int = 96,
 ) -> list[Image.Image]:
-    """Localize and crop a feature for a batch of images."""
     return [
         localize_feature(p, dino, sae, feature_id, crop_size)[0]
         for p in image_paths

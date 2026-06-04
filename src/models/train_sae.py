@@ -62,8 +62,8 @@ def train_sae(
     output_dir.mkdir(parents=True, exist_ok=True)
     best_path = output_dir / "sae_best.pt"
 
-    # tracks how many steps each hidden unit has been inactive
     steps_since_active = torch.zeros(hidden_dim, dtype=torch.long, device=device)
+    revive_gen = torch.Generator(device=device).manual_seed(1337)
     best_val_loss = float("inf")
     epochs_without_improvement = 0
     step = 0
@@ -80,7 +80,6 @@ def train_sae(
 
             recon = recon_fn(x, x_hat)
             if topk > 0:
-                # in topk mode there is no sparsity penalty, K features are always active
                 loss = recon
                 sparse_display = (h > 0).float().sum(dim=1).mean()
             else:
@@ -92,7 +91,6 @@ def train_sae(
             loss.backward()
             optimizer.step()
 
-            # keep decoder columns unit-norm so steering directions are comparable
             if not tied_weights:
                 with torch.no_grad():
                     F.normalize(sae.decoder.weight.data, dim=0, out=sae.decoder.weight.data)
@@ -102,12 +100,13 @@ def train_sae(
                 steps_since_active[fired] = 0
                 steps_since_active[~fired] += 1
 
-                # revive dead neurons by reinitializing from current residuals
                 dead_mask = steps_since_active > dead_threshold_steps
                 n_dead = int(dead_mask.sum().item())
                 if n_dead > 0:
                     residual = (x - x_hat).detach()
-                    rand_idx = torch.randint(0, residual.shape[0], (n_dead,), device=device)
+                    rand_idx = torch.randint(
+                        0, residual.shape[0], (n_dead,), generator=revive_gen, device=device
+                    )
                     new_dirs = F.normalize(residual[rand_idx], dim=1)
                     sae.encoder.weight.data[dead_mask] = new_dirs
                     sae.encoder.bias.data[dead_mask] = 0.0
@@ -125,7 +124,6 @@ def train_sae(
                     f"{'L0' if topk > 0 else 'sparse'}={sparse_display.item():.4f} dead={dead_ratio:.1%}"
                 )
 
-        # validation uses reconstruction only, no sparsity term
         sae.eval()
         val_total_loss = 0.0
         val_l0_total = 0.0

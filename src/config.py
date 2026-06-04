@@ -38,6 +38,13 @@ class DatasetConfig(StrictModel):
     batch_size: int = 64
     adapter: str = "generic"
 
+    @field_validator("path")
+    @classmethod
+    def path_exists(cls, v: Path) -> Path:
+        if not v.exists():
+            raise ValueError(f"dataset.path does not exist: {v}")
+        return v
+
 
 class EncoderConfig(StrictModel):
     use_patches: bool = False
@@ -56,12 +63,20 @@ class NamingConfig(StrictModel):
     vlm_model: str = "Qwen/Qwen3-VL-4B-Instruct"
 
 
+class PathsConfig(StrictModel):
+    index: Path = Path("data/processed/index.faiss")
+    sae_model: Path = Path("models/sae_best.pt")
+    embeddings: Path = Path("data/processed/embeddings.npy")
+    image_paths: Path = Path("data/processed/image_paths.json")
+
+
 class AppConfig(StrictModel):
     dataset: DatasetConfig
     encoder: EncoderConfig = Field(default_factory=EncoderConfig)
     sae: SAEConfig = Field(default_factory=SAEConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     naming: NamingConfig = Field(default_factory=NamingConfig)
+    paths: PathsConfig = Field(default_factory=PathsConfig)
 
     @classmethod
     def from_yaml(cls, path: Path) -> "AppConfig":

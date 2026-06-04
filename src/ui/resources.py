@@ -19,6 +19,15 @@ DEFAULT_SAE_PATH = Path("models/sae_best.pt")
 DEFAULT_EMBEDDINGS_PATH = Path("data/processed/embeddings.npy")
 DEFAULT_IMAGE_PATHS_JSON = Path("data/processed/image_paths.json")
 
+RAM_LOAD_MAX_BYTES = 4 * 1024 ** 3
+
+
+def _load_array_smart(path: Path) -> np.ndarray:
+    size = path.stat().st_size
+    if size <= RAM_LOAD_MAX_BYTES:
+        return np.load(path)
+    return np.load(path, mmap_mode="r")
+
 
 def _find_first(candidates):
     for npy, jp in candidates:
@@ -112,14 +121,14 @@ def load_resources(
     if sae_index_path.exists():
         sae_index = load_index(sae_index_path)
 
-    embeddings = np.load(embeddings_path, mmap_mode="r")
+    embeddings = _load_array_smart(embeddings_path)
     image_paths = json.loads(image_paths_json.read_text())
     image_classes = _build_image_class_metadata(image_paths, adapter)
 
     activations = None
     acts_path = embeddings_path.parent / "activations.npy"
     if acts_path.exists():
-        activations = np.load(acts_path, mmap_mode="r")
+        activations = _load_array_smart(acts_path)
 
     processed = Path("data/processed")
 
@@ -162,6 +171,13 @@ def load_resources(
         )
     logger.info("Previews ready.")
 
+    path_to_idx = {p: i for i, p in enumerate(image_paths)}
+
+    feature_scales = None
+    if activations is not None:
+        stds = np.asarray(activations, dtype=np.float32).std(axis=0)
+        feature_scales = np.where(stds > 1e-6, stds, 1.0).astype(np.float32)
+
     return AppState(
         dino=dino,
         sae=sae,
@@ -178,4 +194,6 @@ def load_resources(
         class_names=class_names,
         preview_top=preview_top,
         preview_bottom=preview_bottom,
+        path_to_idx=path_to_idx,
+        feature_scales=feature_scales,
     )

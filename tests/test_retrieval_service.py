@@ -8,7 +8,7 @@ import pytest
 import torch
 from PIL import Image
 
-from src.ui.retrieval_service import RetrievalService, SearchResult
+from src.ui.retrieval_service import RetrievalResult, RetrievalService, SearchResult
 from src.ui.state import AppState
 
 
@@ -65,11 +65,12 @@ class TestRetrieve:
         query_emb /= np.linalg.norm(query_emb)
         slider_values = [0.0] * len(service._state.feature_ids)
 
-        results = service.retrieve(query_emb, slider_values, k=5)
+        result = service.retrieve(query_emb, slider_values, k=5)
 
-        assert isinstance(results, list)
-        assert len(results) <= 5
-        for r in results:
+        assert isinstance(result, RetrievalResult)
+        assert isinstance(result.items, list)
+        assert len(result.items) <= 5
+        for r in result.items:
             assert isinstance(r, SearchResult)
             assert isinstance(r.image, Image.Image)
 
@@ -78,8 +79,8 @@ class TestRetrieve:
         query_emb /= np.linalg.norm(query_emb)
         slider_values = [0.0] * len(service._state.feature_ids)
 
-        results = service.retrieve(query_emb, slider_values, k=3)
-        assert isinstance(results, list)
+        result = service.retrieve(query_emb, slider_values, k=3)
+        assert isinstance(result.items, list)
 
     def test_uses_direction_sliders_when_class_directions_set(
         self, service, input_dim, fake_embeddings
@@ -92,5 +93,5 @@ class TestRetrieve:
         service._state.feature_names = [f"dir_{i}" for i in range(n_dirs)]
 
         query_emb = fake_embeddings[0]
-        results = service.retrieve(query_emb, [0.0] * n_dirs, k=4)
-        assert isinstance(results, list)
+        result = service.retrieve(query_emb, [0.0] * n_dirs, k=4)
+        assert isinstance(result.items, list)

@@ -86,6 +86,8 @@ def _mmr_rerank(
         return distances, indices
 
     embs = np.ascontiguousarray(corpus_embeddings[indices], dtype=np.float32)
+    norms = np.linalg.norm(embs, axis=1, keepdims=True)
+    embs = embs / np.where(norms > 1e-8, norms, 1.0)
     sim_matrix = embs @ embs.T
 
     selected: list[int] = []
@@ -98,9 +100,9 @@ def _mmr_rerank(
     while remaining:
         max_sim = sim_matrix[remaining][:, selected].max(axis=1)
         mmr_scores = mmr_lambda * distances[remaining] - (1.0 - mmr_lambda) * max_sim
-        best = remaining[int(np.argmax(mmr_scores))]
-        selected.append(best)
-        remaining.remove(best)
+        best_pos = int(np.argmax(mmr_scores))
+        selected.append(remaining[best_pos])
+        remaining.pop(best_pos)
 
     order = np.array(selected)
     return distances[order], indices[order]
@@ -117,6 +119,7 @@ def search_with_sliders(
     mmr_lambda: float = 0.7,
     sae_index: faiss.Index | None = None,
     sae_index_weight: float = 0.3,
+    feature_scales: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Steer the query, search FAISS, then optionally apply two re-ranking passes.
 
@@ -137,6 +140,8 @@ def search_with_sliders(
 
     feature_ids = list(slider_config.keys())
     alphas = [slider_config[fid] for fid in feature_ids]
+    if feature_scales is not None:
+        alphas = [a * float(feature_scales[fid]) for a, fid in zip(alphas, feature_ids)]
     directions = decoder_weight[:, feature_ids].T  # (n_sliders, input_dim)
     steered = steer_query(query_emb, directions, alphas)
 
@@ -151,13 +156,12 @@ def search_with_sliders(
         acts_normed = acts / norm if norm > 1e-8 else acts
         sae_dists, sae_idxs = search(sae_index, acts_normed, k=fetch_k)
 
+        rrf_k = 60.0
         scores: dict[int, float] = {}
-        max_d = max(dists.max(), 1e-8)
-        max_s = max(sae_dists.max(), 1e-8)
-        for d, idx in zip(dists, idxs):
-            scores[int(idx)] = scores.get(int(idx), 0.0) + (1.0 - sae_index_weight) * float(d) / max_d
-        for s, idx in zip(sae_dists, sae_idxs):
-            scores[int(idx)] = scores.get(int(idx), 0.0) + sae_index_weight * float(s) / max_s
+        for rank, idx in enumerate(idxs):
+            scores[int(idx)] = scores.get(int(idx), 0.0) + (1.0 - sae_index_weight) / (rrf_k + rank)
+        for rank, idx in enumerate(sae_idxs):
+            scores[int(idx)] = scores.get(int(idx), 0.0) + sae_index_weight / (rrf_k + rank)
         sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:fetch_k]
         idxs = np.array([i for i, _ in sorted_items])
         dists = np.array([v for _, v in sorted_items])

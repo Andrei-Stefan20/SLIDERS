@@ -113,13 +113,13 @@ def compute_one_vs_rest_directions(
         _, sub, _ = adapter.parse_path(path)
         class_indices.setdefault(sub, []).append(i)
 
-    all_idx = list(range(len(image_paths)))
+    all_idx_set = set(range(len(image_paths)))
     directions, names = [], []
 
     for sub, idxs in sorted(class_indices.items()):
         if len(idxs) < MIN_SAMPLES:
             continue
-        rest = [i for i in all_idx if i not in set(idxs)]
+        rest = list(all_idx_set - set(idxs))
         if len(rest) < MIN_SAMPLES:
             continue
         direction = embeddings[idxs].mean(0) - embeddings[rest].mean(0)

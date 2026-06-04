@@ -14,10 +14,10 @@ const S = {
 
 const BARS = [];
 const FEATURE_ROWS = [];
-const SLIDER_MAX = 4;         // max steering strength, arbitrary — increase for stronger effects
+const SLIDER_MAX = 6;
 const SLIDER_MIN = -SLIDER_MAX;
 const SLIDER_STEP = 0.05;
-const AUTO_PREFILL_MAX = 3.2; // auto-fill caps below SLIDER_MAX to leave manual headroom
+const AUTO_PREFILL_MAX = 4.5;
 const RESET_ICON = `
   <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
     <path d="M20 11a8 8 0 1 1-2.34-5.66L20 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>

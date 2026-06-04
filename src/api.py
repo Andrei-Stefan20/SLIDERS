@@ -1,12 +1,13 @@
 import argparse
 import base64
 import io
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
 from PIL import Image as PILImage
 from pydantic import BaseModel
@@ -59,10 +60,12 @@ def _path_to_b64(path: str, size: int = 120) -> str | None:
 
 def _compute_scores(emb: np.ndarray) -> list[float]:
     state = _require_state()
+    n = float(np.linalg.norm(emb))
+    q = emb / n if n > 1e-8 else emb
     if state.class_directions is not None:
-        return (state.class_directions @ emb).tolist()
+        return (state.class_directions @ q).tolist()
     with torch.no_grad():
-        t = torch.tensor(emb, dtype=torch.float32).unsqueeze(0)
+        t = torch.tensor(q, dtype=torch.float32).unsqueeze(0)
         acts = state.sae.encode(t).squeeze(0).numpy()
     return [float(acts[fid]) for fid in state.feature_ids]
 
@@ -121,6 +124,18 @@ def _build_feature_payload(feature_id: int) -> dict:
 app = FastAPI(title="SLIDERS API")
 
 
+@app.middleware("http")
+async def log_latency(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    if request.url.path.startswith("/api/"):
+        logger.info(
+            f"{request.method} {request.url.path} {response.status_code} {elapsed_ms:.1f}ms"
+        )
+    return response
+
+
 @app.get("/api/features")
 async def get_features():
     state = _require_state()
@@ -140,7 +155,7 @@ async def encode(file: UploadFile = File(...)):
     pil = PILImage.open(io.BytesIO(data)).convert("RGB")
     img_np = np.array(pil)
     raw_emb = service.encode_image_raw(img_np)
-    emb = service.encode_image(img_np)
+    emb = service.normalize(raw_emb)
     scores = _compute_scores(raw_emb)
     return {"embedding": emb.tolist(), "scores": scores}
 
@@ -155,28 +170,29 @@ class RetrieveRequest(BaseModel):
 async def retrieve(req: RetrieveRequest):
     state = _require_state()
     service = _require_service()
-    emb  = np.array(req.embedding, dtype=np.float32)
-    imgs = service.retrieve(emb, req.sliders, k=req.k)
+    emb = np.array(req.embedding, dtype=np.float32)
+    result = service.retrieve(emb, req.sliders, k=req.k)
     items = []
-    for result in imgs:
-        path = result.path
+    for sr in result.items:
+        path = sr.path
         class_name = ""
         if path:
-            try:
-                idx = state.image_paths.index(path)
+            idx = state.path_to_idx.get(path)
+            if idx is not None and 0 <= idx < len(state.image_classes):
                 class_name = state.image_classes[idx]
-            except ValueError:
-                class_name = ""
         items.append({
-            "image": _to_b64(result.image, size=240, quality=82),
-            "download": _to_b64(result.image, size=0, quality=92),
+            "image": _to_b64(sr.image, size=240, quality=82),
+            "download": _to_b64(sr.image, size=0, quality=92),
             "path": path,
             "class_name": class_name,
         })
-    return {"images": items, "majority_class": service.last_majority_class}
+    return {
+        "images": items,
+        "majority_class": result.majority_class,
+        "was_filtered": result.was_filtered,
+    }
 
 
-# Serve static frontend, registered last so API routes take precedence
 _APP_DIR = Path(__file__).parent.parent / "app"
 if _APP_DIR.exists():
     app.mount("/", StaticFiles(directory=str(_APP_DIR), html=True), name="static")
@@ -195,11 +211,12 @@ if __name__ == "__main__":
     dataset = args.dataset or (cfg.dataset.name if cfg else None)
     n_sliders = cfg.retrieval.n_sliders if cfg else 20
 
+    paths_cfg = cfg.paths if cfg else None
     _state = load_resources(
-        index_path=DEFAULT_INDEX_PATH,
-        sae_path=DEFAULT_SAE_PATH,
-        embeddings_path=DEFAULT_EMBEDDINGS_PATH,
-        image_paths_json=DEFAULT_IMAGE_PATHS_JSON,
+        index_path=paths_cfg.index if paths_cfg else DEFAULT_INDEX_PATH,
+        sae_path=paths_cfg.sae_model if paths_cfg else DEFAULT_SAE_PATH,
+        embeddings_path=paths_cfg.embeddings if paths_cfg else DEFAULT_EMBEDDINGS_PATH,
+        image_paths_json=paths_cfg.image_paths if paths_cfg else DEFAULT_IMAGE_PATHS_JSON,
         dataset=dataset,
         adapter_name=(cfg.dataset.adapter if cfg else dataset or "generic"),
         n_sliders=n_sliders,

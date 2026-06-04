@@ -26,3 +26,6 @@ class AppState:
 
     preview_top: list[str] | None = None
     preview_bottom: list[str] | None = None
+
+    path_to_idx: dict[str, int] = field(default_factory=dict)
+    feature_scales: np.ndarray | None = None

@@ -1,11 +1,25 @@
 """Feature naming using a multimodal VLM."""
 
+import hashlib
+import io
+import json
+from pathlib import Path
+
 import torch
 from PIL import Image
 
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _crops_fingerprint(crops: list[Image.Image]) -> str:
+    h = hashlib.sha1()
+    for c in crops:
+        buf = io.BytesIO()
+        c.save(buf, format="PNG")
+        h.update(buf.getvalue())
+    return h.hexdigest()
 
 CONTRASTIVE_PROMPT = (
     "You are analyzing visual features discovered by a neural network.\n\n"
@@ -55,6 +69,7 @@ class VLMFeatureNamer:
         self,
         model: str = "Qwen/Qwen3-VL-4B-Instruct",
         device: str | None = None,
+        cache_dir: Path | str | None = None,
     ) -> None:
         from transformers import AutoModelForVision2Seq, AutoProcessor
 
@@ -76,6 +91,16 @@ class VLMFeatureNamer:
         self.model = AutoModelForVision2Seq.from_pretrained(
             model, torch_dtype=dtype
         ).to(device).eval()
+
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        if self.cache_dir:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _cache_path(self, top_crops: list[Image.Image], bottom_crops: list[Image.Image]) -> Path | None:
+        if not self.cache_dir:
+            return None
+        key = _crops_fingerprint(top_crops) + "_" + _crops_fingerprint(bottom_crops)
+        return self.cache_dir / f"{self.model_id.replace('/', '_')}_{key}.json"
 
     def _build_messages(
         self,
@@ -138,11 +163,18 @@ class VLMFeatureNamer:
         """Return (name, description) for a feature identified contrastively."""
         import re
 
+        cache_path = self._cache_path(top_crops, bottom_crops)
+        if cache_path and cache_path.exists():
+            cached = json.loads(cache_path.read_text())
+            return cached["name"], cached["description"]
+
         messages = self._build_messages(top_crops, bottom_crops, CONTRASTIVE_PROMPT)
         raw = self._generate(messages, max_new_tokens=80)
         name, desc = self._parse(raw)
 
         if not name or name == "undifferentiated":
+            if cache_path:
+                cache_path.write_text(json.dumps({"name": _FALLBACK[0], "description": _FALLBACK[1]}))
             return _FALLBACK
 
         if verify:
@@ -161,4 +193,6 @@ class VLMFeatureNamer:
         if not desc:
             desc = f"Visual property: {name}."
 
+        if cache_path:
+            cache_path.write_text(json.dumps({"name": name, "description": desc}))
         return name, desc

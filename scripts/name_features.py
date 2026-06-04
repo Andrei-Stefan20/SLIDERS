@@ -48,6 +48,7 @@ def main() -> None:
     parser.add_argument("--vlm-model", type=str, default=None)
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--n-crops", type=int, default=None)
+    parser.add_argument("--cache-dir", type=Path, default=Path("data/cache/vlm_names"))
     args = parser.parse_args()
 
     cfg = AppConfig.from_yaml(args.config) if args.config is not None else None
@@ -112,7 +113,7 @@ def main() -> None:
     from src.naming.vlm_namer import VLMFeatureNamer
 
     dino = DINOEncoder(use_patches=True)
-    vlm = VLMFeatureNamer(model=vlm_model)
+    vlm = VLMFeatureNamer(model=vlm_model, cache_dir=args.cache_dir)
 
     feature_info: dict[str, dict] = {}
     for fid in ranked_features:

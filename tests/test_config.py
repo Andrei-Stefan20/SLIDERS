@@ -62,10 +62,14 @@ class TestSAEConfig:
 
 
 class TestDatasetConfig:
-    def test_basic(self):
-        cfg = DatasetConfig(name="test", path=Path("/tmp/data"))
+    def test_basic(self, tmp_path):
+        cfg = DatasetConfig(name="test", path=tmp_path)
         assert cfg.name == "test"
         assert cfg.adapter == "generic"
+
+    def test_missing_path_raises(self, tmp_path):
+        with pytest.raises(Exception):
+            DatasetConfig(name="test", path=tmp_path / "does_not_exist")
 
 
 class TestRetrievalConfig:
@@ -95,10 +99,10 @@ class TestNamingConfig:
 
 class TestAppConfig:
     def test_from_yaml(self, tmp_path):
-        yaml_content = """
+        yaml_content = f"""
             dataset:
             name: plantvillage
-            path: /data/plantvillage
+            path: {tmp_path}
             adapter: plantvillage
             sae:
             hidden_dim: 4096
@@ -119,10 +123,10 @@ class TestAppConfig:
         assert cfg.naming.n_features == 12
 
     def test_from_yaml_minimal(self, tmp_path):
-        yaml_content = """
+        yaml_content = f"""
                     dataset:
                     name: test
-                    path: /tmp/data
+                    path: {tmp_path}
                     """
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text(yaml_content)
@@ -132,10 +136,10 @@ class TestAppConfig:
         assert cfg.retrieval.n_sliders == 20
 
     def test_from_yaml_unknown_key_raises(self, tmp_path):
-        yaml_content = """
+        yaml_content = f"""
                     dataset:
                     name: test
-                    path: /tmp/data
+                    path: {tmp_path}
                     naming:
                     llm_model: gpt-4o
                     """

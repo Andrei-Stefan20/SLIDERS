@@ -109,7 +109,7 @@ def rank_diverse_mmr(
 
     if len(candidates) == 0:
         variance = activations.var(axis=0)
-        return list(np.argsort(variance)[::-1][:n_features])
+        return [int(i) for i in np.argsort(variance)[::-1][:n_features]]
 
     variance = activations[:, candidates].var(axis=0)
     scores_norm = variance / (variance.max() + 1e-8)

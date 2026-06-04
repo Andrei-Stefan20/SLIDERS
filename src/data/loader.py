@@ -9,12 +9,7 @@ import torchvision.transforms as T
 from PIL import Image
 from torch.utils.data import Dataset
 
-IMAGENET_TRANSFORM = T.Compose([
-    T.Resize(256),
-    T.CenterCrop(224),
-    T.ToTensor(),
-    T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-])
+from src.encoders.dino_encoder import DINO_TRANSFORM as IMAGENET_TRANSFORM
 
 
 class ImageFolderFlat(Dataset):
@@ -54,6 +49,10 @@ class EmbeddingDataset(Dataset):
             self._data: np.ndarray = np.load(path, mmap_mode="r")
         else:
             self._data = np.load(path).astype(np.float32)
+        if self._data.ndim != 2:
+            raise ValueError(
+                f"EmbeddingDataset expects shape (N, D), got {self._data.shape}"
+            )
 
     def __len__(self) -> int:
         return len(self._data)

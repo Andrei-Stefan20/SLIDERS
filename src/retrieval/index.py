@@ -8,9 +8,11 @@ import numpy as np
 
 def build_index(embeddings: np.ndarray) -> faiss.Index:
     """IndexFlatIP over L2-normalised embeddings (cosine similarity)."""
-    embeddings = np.ascontiguousarray(embeddings, dtype=np.float32)
-    index = faiss.IndexFlatIP(embeddings.shape[1])
-    index.add(embeddings)  # type: ignore[call-arg]
+    embs = np.asarray(embeddings, dtype=np.float32)
+    norms = np.linalg.norm(embs, axis=1, keepdims=True)
+    embs = np.ascontiguousarray(embs / np.where(norms > 1e-8, norms, 1.0))
+    index = faiss.IndexFlatIP(embs.shape[1])
+    index.add(embs)  # type: ignore[call-arg]
     return index
 
 

@@ -19,20 +19,17 @@ class SearchResult:
     path: str
 
 
+@dataclass
+class RetrievalResult:
+    items: list[SearchResult]
+    majority_class: str | None
+    was_filtered: bool
+
+
 class RetrievalService:
 
     def __init__(self, state: AppState) -> None:
         self._state = state
-        self.last_majority_class: str | None = None
-
-    def encode_image(self, query_image: np.ndarray) -> np.ndarray:
-        pil = Image.fromarray(query_image).convert("RGB")
-        emb = (
-            self._state.dino.encode(DINO_TRANSFORM(pil).unsqueeze(0))
-            .squeeze(0)
-            .numpy()
-        )
-        return normalize_embeddings(emb.reshape(1, -1)).squeeze(0)
 
     def encode_image_raw(self, query_image: np.ndarray) -> np.ndarray:
         pil = Image.fromarray(query_image).convert("RGB")
@@ -42,6 +39,14 @@ class RetrievalService:
             .numpy()
             .astype(np.float32)
         )
+
+    def encode_image(self, query_image: np.ndarray) -> np.ndarray:
+        raw = self.encode_image_raw(query_image)
+        return normalize_embeddings(raw.reshape(1, -1)).squeeze(0)
+
+    @staticmethod
+    def normalize(raw_emb: np.ndarray) -> np.ndarray:
+        return normalize_embeddings(raw_emb.reshape(1, -1)).squeeze(0)
 
     def _majority_class_from_indices(self, indices: np.ndarray) -> str | None:
         state = self._state
@@ -62,9 +67,9 @@ class RetrievalService:
         indices: np.ndarray,
         target_class: str | None,
         k: int,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, bool]:
         if not target_class:
-            return distances[:k], indices[:k]
+            return distances[:k], indices[:k], False
 
         state = self._state
         pairs = [
@@ -74,11 +79,11 @@ class RetrievalService:
             and state.image_classes[int(idx)] == target_class
         ]
         if not pairs:
-            return distances[:k], indices[:k]
+            return distances[:k], indices[:k], False
 
         kept_dists = np.asarray([dist for dist, _ in pairs], dtype=distances.dtype)
         kept_idxs = np.asarray([idx for _, idx in pairs], dtype=indices.dtype)
-        return kept_dists[:k], kept_idxs[:k]
+        return kept_dists[:k], kept_idxs[:k], True
 
     def classify_majority_class(
         self,
@@ -98,27 +103,8 @@ class RetrievalService:
         slider_values: list[float],
         mmr_lambda: float = 0.7,
         k: int = 20,
-    ) -> list[SearchResult]:
-        """Retrieve images by steering query_emb along sliders and running FAISS search.
-
-        Args:
-            query_emb: Pre-encoded query embedding (unit norm).
-            slider_values: One float per feature/direction slot.
-            mmr_lambda: Diversity–relevance trade-off (1.0 = pure relevance).
-            k: Number of results.
-
-        Returns:
-            List of SearchResult objects.
-        """
+    ) -> RetrievalResult:
         state = self._state
-
-        majority_class = self.classify_majority_class(
-            query_emb,
-            k=max(k * 8, 120),
-        )
-        self.last_majority_class = majority_class
-
-        search_k = min(max(k * 8, 120), len(state.image_paths))
 
         if state.class_directions is not None:
             distances, indices = search_with_direction_sliders(
@@ -126,7 +112,7 @@ class RetrievalService:
                 query_emb=query_emb,
                 directions=state.class_directions,
                 slider_values=[float(v) for v in slider_values],
-                k=search_k,
+                k=k,
                 corpus_embeddings=state.embeddings if mmr_lambda < 1.0 else None,
                 mmr_lambda=mmr_lambda,
             )
@@ -141,22 +127,26 @@ class RetrievalService:
                 query_emb=query_emb,
                 sae_model=state.sae,
                 slider_config=slider_config,
-                k=search_k,
+                k=k,
                 corpus_activations=state.activations,
                 corpus_embeddings=state.embeddings if mmr_lambda < 1.0 else None,
                 mmr_lambda=mmr_lambda,
                 sae_index=state.sae_index,
+                feature_scales=state.feature_scales,
             )
 
-        distances, indices = self._filter_to_class(distances, indices, majority_class, k)
+        majority_class = self._majority_class_from_indices(indices)
+        distances, indices, was_filtered = self._filter_to_class(
+            distances, indices, majority_class, k
+        )
 
-        results: list[SearchResult] = []
+        items: list[SearchResult] = []
         for idx in indices:
             if 0 <= idx < len(state.image_paths):
                 try:
                     path = state.image_paths[idx]
                     image = Image.open(path).convert("RGB")
-                    results.append(SearchResult(image=image, path=path))
+                    items.append(SearchResult(image=image, path=path))
                 except Exception as e:
                     logger.warning(f"Could not load image {state.image_paths[idx]}: {e}")
-        return results
+        return RetrievalResult(items=items, majority_class=majority_class, was_filtered=was_filtered)

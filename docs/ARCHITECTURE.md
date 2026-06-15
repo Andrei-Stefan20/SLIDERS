@@ -22,11 +22,13 @@ Each script produces files that the next step consumes:
 
 ```
 extract_embeddings  ->  <dataset>_embeddings.npy, <dataset>_image_paths.json
-train_sae           ->  sae_best.pt
-name_features       ->  feature_names.json
-build_index         ->  index.faiss, activations.npy, (sae_index.faiss)
-compute_class_dir.  ->  class_directions.npy, class_direction_names.json
+train_sae           ->  <dataset>_sae_best.pt (+ .meta.json)
+name_features       ->  <dataset>_feature_names.json
+build_index         ->  <dataset>_index.faiss, <dataset>_activations.npy, (<dataset>_sae_index.faiss)
+compute_class_dir.  ->  <dataset>_class_directions.npy, <dataset>_class_direction_names.json
 ```
+
+All artifacts share the `<dataset>` prefix (the `dataset.name` in the config), derived automatically from the embeddings filename so multiple datasets coexist on disk.
 
 ## DINOv2
 
@@ -58,17 +60,17 @@ Sliders move the query embedding along SAE decoder columns before the FAISS sear
 3. normalizes the steered vector
 4. searches `index.faiss`
 
-If `activations.npy` exists the retrieved images are then reranked by their precomputed SAE activations on the active features, compensating for the fact that FAISS operates in DINO embedding space while slider meaning lives in SAE feature space.
+If `<dataset>_activations.npy` exists the retrieved images are then reranked by their precomputed SAE activations on the active features, compensating for the fact that FAISS operates in DINO embedding space while slider meaning lives in SAE feature space.
 
-If `sae_index.faiss` also exists the code additionally encodes the steered query into SAE activations, searches that index, merges the two hit lists, and reranks again.
+If `<dataset>_sae_index.faiss` also exists the code additionally encodes the steered query into SAE activations, searches that index, merges the two hit lists, and reranks again.
 
 ## Slider sources
 
 At API startup `src/ui/resources.py` decides which sliders to show:
 
-1. If `class_directions.npy` exists → class direction sliders, ignoring SAE features.
-2. Else if `feature_names.json` exists → named SAE feature sliders.
-3. Else if `activations.npy` exists → SAE features ranked by activation variance, labeled `Feature <id>`.
+1. If `<dataset>_class_directions.npy` exists → class direction sliders, ignoring SAE features.
+2. Else if `<dataset>_feature_names.json` exists → named SAE feature sliders.
+3. Else if `<dataset>_activations.npy` exists → SAE features ranked by activation variance, labeled `Feature <id>`.
 
 ## API and frontend
 

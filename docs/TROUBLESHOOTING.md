@@ -5,8 +5,8 @@
 | Symptom | Cause | Fix | File to inspect |
 | --- | --- | --- | --- |
 | API returns `503` | resources did not load | check artifact paths and startup logs | `src/api.py`, `src/ui/resources.py` |
-| missing `sae_best.pt` | SAE training did not run or output path differs | run `scripts/train_sae.py` or copy checkpoint to `models/` | `scripts/train_sae.py` |
-| missing `index.faiss` | index build did not run | run `scripts/build_index.py` | `scripts/build_index.py` |
+| missing `<dataset>_sae_best.pt` | SAE training did not run or output path differs | run `scripts/train_sae.py` or copy checkpoint to `models/` | `scripts/train_sae.py` |
+| missing `<dataset>_index.faiss` | index build did not run | run `scripts/build_index.py` | `scripts/build_index.py` |
 | config validation error | unknown field or invalid value | compare YAML with `src/config.py` | `src/config.py`, `configs/*.yaml` |
 
 ## Sliders
@@ -15,8 +15,8 @@
 | --- | --- | --- | --- |
 | no sliders | no feature names, class directions, or activations | run naming or rebuild index with `--sae-model` | `src/ui/resources.py` |
 | class sliders appear instead of SAE features | class direction files exist | remove class direction files if SAE sliders are wanted | `data/processed/` |
-| sliders do not change results | `activations.npy` or `sae_index.faiss` missing | rebuild index with `--sae-model` | `scripts/build_index.py` |
-| generic `Feature <id>` labels | `feature_names.json` missing | run `scripts/name_features.py` | `models/feature_names.json` |
+| sliders do not change results | `<dataset>_activations.npy` or `<dataset>_sae_index.faiss` missing | rebuild index with `--sae-model` | `scripts/build_index.py` |
+| generic `Feature <id>` labels | `<dataset>_feature_names.json` missing | run `scripts/name_features.py` | `models/<dataset>_feature_names.json` |
 
 ## Retrieval results
 

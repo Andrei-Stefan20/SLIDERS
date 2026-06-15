@@ -1,12 +1,4 @@
-"""CLI script for training a Sparse Autoencoder on pre-extracted embeddings.
-
-Usage:
-    python scripts/train_sae.py --embeddings data/processed/plantvillage_embeddings.npy \\
-        --output models/ --config configs/plantvillage.yaml
-"""
-
 # ruff: noqa: E402
-
 import argparse
 import importlib
 import sys
@@ -19,6 +11,7 @@ if str(ROOT) not in sys.path:
 
 from src.config import SAEConfig
 from src.models.train_sae import train_sae
+from src.utils.io import dataset_stem
 
 
 def main() -> None:
@@ -135,9 +128,12 @@ def main() -> None:
     logger.info(f"  patience             : {patience}")
     logger.info(f"  dead_threshold_steps : {dead_threshold_steps}")
 
+    prefix = f"{dataset_stem(args.embeddings)}_"
+
     train_sae(
         embeddings_path=args.embeddings,
         output_dir=args.output,
+        prefix=prefix,
         hidden_dim=hidden_dim,
         lambda_sparsity=lambda_sparsity,
         lr=lr,

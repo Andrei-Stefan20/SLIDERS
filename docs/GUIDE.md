@@ -176,9 +176,10 @@ python scripts/name_features.py `
   --config configs/plantvillage.yaml `
   --embeddings data/processed/plantvillage_train_embeddings.npy `
   --image-paths data/processed/plantvillage_train_image_paths.json `
-  --sae-model models/sae_best.pt `
-  --output models/feature_names.json
+  --sae-model models/plantvillage_train_sae_best.pt
 ```
+
+The output path is derived from the embeddings name (`models/plantvillage_train_feature_names.json`); pass `--output` only to override it.
 
 5. Build indexes and activations.
 
@@ -187,9 +188,10 @@ Build on the training set. The UI will search only over training images.
 ```powershell
 python scripts/build_index.py `
   --embeddings data/processed/plantvillage_train_embeddings.npy `
-  --output data/processed/index.faiss `
-  --sae-model models/sae_best.pt
+  --sae-model models/plantvillage_train_sae_best.pt
 ```
+
+Index and activation paths are derived from the embeddings name (`plantvillage_train_index.faiss`, `plantvillage_train_sae_index.faiss`, `plantvillage_train_activations.npy`).
 
 6. Optional: compute class direction sliders.
 
@@ -211,16 +213,18 @@ Open `http://127.0.0.1:8000`.
 
 ## Output files
 
+All artifacts are prefixed with the dataset name (`dataset.name` in the config, here `plantvillage_train`), derived automatically from the embeddings filename. This lets multiple datasets coexist in `data/processed/` and `models/` without overwriting each other.
+
 | File | Created by | Used by |
 | --- | --- | --- |
-| `data/processed/<dataset>_train_embeddings.npy` | `extract_embeddings.py --val-split` | SAE training, index build, UI |
-| `data/processed/<dataset>_train_image_paths.json` | `extract_embeddings.py --val-split` | feature naming, class directions, UI |
-| `data/processed/<dataset>_val_embeddings.npy` | `extract_embeddings.py --val-split` | evaluation |
-| `data/processed/<dataset>_val_image_paths.json` | `extract_embeddings.py --val-split` | evaluation |
-| `models/sae_best.pt` | `train_sae.py` | feature naming, index build, UI |
-| `models/feature_names.json` | `name_features.py` | UI slider labels |
-| `data/processed/index.faiss` | `build_index.py` | FAISS search |
-| `data/processed/sae_index.faiss` | `build_index.py --sae-model` | optional SAE-space result merge |
-| `data/processed/activations.npy` | `build_index.py --sae-model` | slider reranking, previews, fallback labels |
-| `data/processed/class_directions.npy` | `compute_class_directions.py` | optional class sliders |
-| `data/processed/class_direction_names.json` | `compute_class_directions.py` | optional class slider labels |
+| `data/processed/plantvillage_train_embeddings.npy` | `extract_embeddings.py` | SAE training, index build, UI |
+| `data/processed/plantvillage_train_image_paths.json` | `extract_embeddings.py` | feature naming, class directions, UI |
+| `data/processed/plantvillage_val_embeddings.npy` | `extract_embeddings.py` | evaluation |
+| `data/processed/plantvillage_val_image_paths.json` | `extract_embeddings.py` | evaluation |
+| `models/plantvillage_train_sae_best.pt` (+ `.meta.json`) | `train_sae.py` | feature naming, index build, UI |
+| `models/plantvillage_train_feature_names.json` | `name_features.py` | UI slider labels |
+| `data/processed/plantvillage_train_index.faiss` | `build_index.py` | FAISS search |
+| `data/processed/plantvillage_train_sae_index.faiss` | `build_index.py --sae-model` | optional SAE-space result merge |
+| `data/processed/plantvillage_train_activations.npy` | `build_index.py --sae-model` | slider reranking, previews, automatic labels |
+| `data/processed/plantvillage_train_class_directions.npy` | `compute_class_directions.py` | optional class sliders |
+| `data/processed/plantvillage_train_class_direction_names.json` | `compute_class_directions.py` | optional class slider labels |

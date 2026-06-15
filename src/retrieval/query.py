@@ -1,5 +1,3 @@
-"""High-level query interface over a FAISS index."""
-
 import faiss
 import numpy as np
 
@@ -16,15 +14,6 @@ def search_with_direction_sliders(
     corpus_embeddings: np.ndarray | None = None,
     mmr_lambda: float = 0.7,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Steer query using pre-computed directions (e.g. difference-in-means).
-
-    Unlike search_with_sliders, this requires no SAE model. Directions are
-    passed directly in the original embedding space.
-
-    Args:
-        directions: Shape (N, D), one direction per slider.
-        slider_values: Alpha for each direction; zero entries are skipped.
-    """
     active = [(d, a) for d, a in zip(directions, slider_values) if abs(a) > 1e-6]
     if not active:
         return search(index, query_emb, k=k)
@@ -59,16 +48,11 @@ def _sae_activation_rerank(
     active_feature_ids: list[int],
     active_alphas: list[float],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Re-rank by dot product between corpus SAE activations and active slider weights.
-
-    Fixes the mismatch between the DINOv2 search space and the SAE feature space:
-    FAISS finds globally similar images, but this promotes images that actually
-    have high activation on the requested features.
-    """
     alphas_arr = np.array(active_alphas, dtype=np.float32)
     sae_scores = (corpus_activations[indices][:, active_feature_ids] * alphas_arr).sum(axis=1)
     order = np.argsort(sae_scores)[::-1]
-    return distances[order], indices[order]
+    # Returns relevance scores, not cosine distances; MMR uses them downstream.
+    return sae_scores[order].astype(np.float32), indices[order]
 
 
 def _mmr_rerank(
@@ -77,11 +61,6 @@ def _mmr_rerank(
     corpus_embeddings: np.ndarray,
     mmr_lambda: float = 0.7,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Maximal Marginal Relevance re-ranking for diversity (Carbonell & Goldstein, 1998).
-
-    Selects: argmax [ lambda * relevance - (1-lambda) * max_sim_to_selected ]
-    mmr_lambda=1.0 is pure relevance, mmr_lambda=0.0 is pure diversity.
-    """
     if mmr_lambda >= 1.0 or len(indices) <= 1:
         return distances, indices
 
@@ -121,28 +100,21 @@ def search_with_sliders(
     sae_index_weight: float = 0.3,
     feature_scales: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Steer the query, search FAISS, then optionally apply two re-ranking passes.
-
-    Re-ranking passes (applied in order when their inputs are provided):
-      1. SAE activation re-ranking (corpus_activations), for precision
-      2. MMR diversity re-ranking (corpus_embeddings), for variety
-
-    When sae_index is provided, results from both the primary and SAE-space
-    indices are merged before re-ranking.
-    """
     if not slider_config:
         return search(index, query_emb, k=k)
 
-    if sae_model.tied_weights:
-        decoder_weight = sae_model.encoder.weight.detach().cpu().numpy().T
-    else:
-        decoder_weight = sae_model.decoder.weight.detach().cpu().numpy()
-
     feature_ids = list(slider_config.keys())
-    alphas = [slider_config[fid] for fid in feature_ids]
+    raw_alphas = [slider_config[fid] for fid in feature_ids]
     if feature_scales is not None:
-        alphas = [a * float(feature_scales[fid]) for a, fid in zip(alphas, feature_ids)]
-    directions = decoder_weight[:, feature_ids].T  # (n_sliders, input_dim)
+        alphas = [a * float(feature_scales[fid]) for a, fid in zip(raw_alphas, feature_ids)]
+    else:
+        alphas = list(raw_alphas)
+
+    encoder_weight = sae_model.encoder.weight.detach().cpu().numpy()
+    directions = encoder_weight[feature_ids]
+    # Encoder rows aren't unit-norm; normalize so alpha has a consistent scale.
+    dir_norms = np.linalg.norm(directions, axis=1, keepdims=True)
+    directions = directions / np.where(dir_norms > 1e-8, dir_norms, 1.0)
     steered = steer_query(query_emb, directions, alphas)
 
     fetch_k = max(k * 3, 60) if (corpus_activations is not None or corpus_embeddings is not None) else k
@@ -150,21 +122,30 @@ def search_with_sliders(
 
     if sae_index is not None:
         import torch
+
         with torch.no_grad():
-            acts = sae_model.encode(torch.from_numpy(steered.reshape(1, -1))).numpy()[0]
+            acts = sae_model.encode(torch.from_numpy(query_emb.reshape(1, -1))).numpy()[0]
+        for fid, a in zip(feature_ids, raw_alphas):
+            acts[fid] = max(0.0, float(acts[fid]) + a)
         norm = np.linalg.norm(acts)
         acts_normed = acts / norm if norm > 1e-8 else acts
         sae_dists, sae_idxs = search(sae_index, acts_normed, k=fetch_k)
 
-        rrf_k = 60.0
-        scores: dict[int, float] = {}
-        for rank, idx in enumerate(idxs):
-            scores[int(idx)] = scores.get(int(idx), 0.0) + (1.0 - sae_index_weight) / (rrf_k + rank)
-        for rank, idx in enumerate(sae_idxs):
-            scores[int(idx)] = scores.get(int(idx), 0.0) + sae_index_weight / (rrf_k + rank)
-        sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:fetch_k]
-        idxs = np.array([i for i, _ in sorted_items])
-        dists = np.array([v for _, v in sorted_items])
+        if corpus_activations is not None and feature_ids:
+            # Union both pools; the activation rerank below sets the real order.
+            pool = list(dict.fromkeys([int(i) for i in idxs] + [int(i) for i in sae_idxs]))
+            idxs = np.array(pool)
+            dists = np.linspace(1.0, 0.0, num=len(pool), dtype=np.float32)
+        else:
+            rrf_k = 60.0
+            scores: dict[int, float] = {}
+            for rank, idx in enumerate(idxs):
+                scores[int(idx)] = scores.get(int(idx), 0.0) + (1.0 - sae_index_weight) / (rrf_k + rank)
+            for rank, idx in enumerate(sae_idxs):
+                scores[int(idx)] = scores.get(int(idx), 0.0) + sae_index_weight / (rrf_k + rank)
+            sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:fetch_k]
+            idxs = np.array([i for i, _ in sorted_items])
+            dists = np.array([v for _, v in sorted_items])
 
     if corpus_activations is not None and feature_ids:
         dists, idxs = _sae_activation_rerank(idxs, dists, corpus_activations, feature_ids, alphas)

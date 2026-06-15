@@ -4,12 +4,15 @@
 
 ```bash
 python scripts/evaluate.py \
-  --embeddings data/processed/plantvillage_val_embeddings.npy \
-  --image-paths data/processed/plantvillage_val_image_paths.json \
-  --index data/processed/index.faiss \
-  --sae-model models/sae_best.pt \
-  --feature-names models/feature_names.json
+  --embeddings data/processed/plantvillage_train_embeddings.npy \
+  --image-paths data/processed/plantvillage_train_image_paths.json \
+  --index data/processed/plantvillage_train_index.faiss \
+  --sae-model models/plantvillage_train_sae_best.pt \
+  --feature-names models/plantvillage_train_feature_names.json \
+  --class-directions data/processed/plantvillage_train_class_directions.npy
 ```
+
+`evaluate.py` does self-retrieval over the indexed corpus, so `--embeddings`, `--image-paths`, and `--index` must all refer to the **same set** — use the training set, which is also what the UI searches. `--feature-names` and `--class-directions` are optional and enable the CLIP-naming and class-direction-steering metrics respectively.
 
 `--embeddings`, `--image-paths`, `--index`, and `--sae-model` are required. `--feature-names` is optional, pass it to enable the CLIP-based naming metrics.
 

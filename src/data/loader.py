@@ -1,5 +1,3 @@
-"""Dataset classes for loading raw images and pre-extracted embeddings."""
-
 from pathlib import Path
 from typing import cast
 
@@ -10,10 +8,10 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from src.encoders.dino_encoder import DINO_TRANSFORM as IMAGENET_TRANSFORM
+from src.utils.io import normalize_embeddings
 
 
 class ImageFolderFlat(Dataset):
-    """Recursively loads all images from a directory tree as (tensor, path) pairs."""
 
     EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".webp"})
 
@@ -37,18 +35,19 @@ class ImageFolderFlat(Dataset):
 
 
 class EmbeddingDataset(Dataset):
-    """Wraps a pre-extracted .npy embedding matrix as a PyTorch Dataset.
 
-    Each __getitem__ returns a single float32 embedding vector.
-    The full array is memory-mapped when mmap=True.
-    """
-
-    def __init__(self, npy_path: Path | str, mmap: bool = False) -> None:
+    def __init__(
+        self, npy_path: Path | str, mmap: bool = False, normalize: bool = True
+    ) -> None:
         path = Path(npy_path)
         if mmap:
+            # Stay memory-mapped; normalize per-row in __getitem__ instead.
             self._data: np.ndarray = np.load(path, mmap_mode="r")
+            self._normalize_rows = normalize
         else:
-            self._data = np.load(path).astype(np.float32)
+            data = np.load(path).astype(np.float32)
+            self._data = normalize_embeddings(data) if normalize else data
+            self._normalize_rows = False
         if self._data.ndim != 2:
             raise ValueError(
                 f"EmbeddingDataset expects shape (N, D), got {self._data.shape}"
@@ -58,4 +57,9 @@ class EmbeddingDataset(Dataset):
         return len(self._data)
 
     def __getitem__(self, idx: int) -> torch.Tensor:
-        return torch.from_numpy(self._data[idx].astype(np.float32))
+        row = self._data[idx].astype(np.float32)
+        if self._normalize_rows:
+            norm = float(np.linalg.norm(row))
+            if norm > 0:
+                row = row / norm
+        return torch.from_numpy(row)

@@ -1,7 +1,3 @@
-"""Tests for Pydantic configuration models."""
-
-from pathlib import Path
-
 import pytest
 
 from src.config import (
@@ -100,18 +96,18 @@ class TestNamingConfig:
 class TestAppConfig:
     def test_from_yaml(self, tmp_path):
         yaml_content = f"""
-            dataset:
-            name: plantvillage
-            path: {tmp_path}
-            adapter: plantvillage
-            sae:
-            hidden_dim: 4096
-            epochs: 30
-            retrieval:
-            n_sliders: 12
-            naming:
-            n_features: 12
-            """
+dataset:
+  name: plantvillage
+  path: {tmp_path}
+  adapter: plantvillage
+sae:
+  hidden_dim: 4096
+  epochs: 30
+retrieval:
+  n_sliders: 12
+naming:
+  n_features: 12
+"""
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text(yaml_content)
 
@@ -124,10 +120,10 @@ class TestAppConfig:
 
     def test_from_yaml_minimal(self, tmp_path):
         yaml_content = f"""
-                    dataset:
-                    name: test
-                    path: {tmp_path}
-                    """
+dataset:
+  name: test
+  path: {tmp_path}
+"""
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text(yaml_content)
 
@@ -137,12 +133,12 @@ class TestAppConfig:
 
     def test_from_yaml_unknown_key_raises(self, tmp_path):
         yaml_content = f"""
-                    dataset:
-                    name: test
-                    path: {tmp_path}
-                    naming:
-                    llm_model: gpt-4o
-                    """
+dataset:
+  name: test
+  path: {tmp_path}
+naming:
+  llm_model: gpt-4o
+"""
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text(yaml_content)
 

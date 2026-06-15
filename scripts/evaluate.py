@@ -234,7 +234,7 @@ def main() -> None:
         for fid, score in sorted_faith[:10]:
             print(f"  [{fid:5d}]  faithfulness={score:.3f}")
         print(f"  Mean faithfulness: {np.mean(list(faith_scores.values())):.4f}  "
-              f"(>1.0 = steering works, ≈1.0 = no effect)")
+              f"(>1.0 = steering works, ~1.0 = no effect)")
 
     if not args.skip_isotonicity:
         print("\n=== Steering Isotonicity ===")
@@ -261,7 +261,7 @@ def main() -> None:
         print(f"  PCA mean faithfulness : {ablation['pca_mean_faithfulness']:.4f}")
         print(f"  Improvement ratio     : {ablation['improvement_ratio']:.3f}x")
         if ablation["improvement_ratio"] < 1.1:
-            print("  WARNING: SAE barely outperforms PCA — consider longer training.")
+            print("  WARNING: SAE barely outperforms PCA - consider longer training.")
 
     if args.class_directions is not None:
         print("\n=== Direction Steering Faithfulness ===")

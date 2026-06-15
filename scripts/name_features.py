@@ -1,16 +1,4 @@
-"""CLI script for naming SAE features using VLM contrastive analysis.
-
-Usage:
-    python scripts/name_features.py \\
-        --embeddings data/processed/plantvillage_embeddings.npy \\
-        --image-paths data/processed/plantvillage_image_paths.json \\
-        --sae-model models/sae_best.pt \\
-        --output models/feature_names.json \\
-        --n-features 20
-"""
-
 # ruff: noqa: E402
-
 import argparse
 import json
 import sys
@@ -26,6 +14,7 @@ if str(ROOT) not in sys.path:
 from src.config import AppConfig
 from src.models.sae import SparseAutoencoder
 from src.naming.feature_namer import get_top_images, rank_features_by_variance
+from src.utils.io import dataset_stem, normalize_embeddings
 
 
 def main() -> None:
@@ -33,7 +22,10 @@ def main() -> None:
     parser.add_argument("--embeddings", type=Path, required=True)
     parser.add_argument("--image-paths", type=Path, required=True)
     parser.add_argument("--sae-model", type=Path, required=True)
-    parser.add_argument("--output", type=Path, default=Path("models/feature_names.json"))
+    parser.add_argument(
+        "--output", type=Path, default=None,
+        help="Default: models/<dataset>_feature_names.json derived from --embeddings.",
+    )
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--n-features", type=int, default=None)
     parser.add_argument("--topk", type=int, default=None, help="TopK used during SAE training (0 = ReLU).")
@@ -48,14 +40,20 @@ def main() -> None:
     parser.add_argument("--vlm-model", type=str, default=None)
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--n-crops", type=int, default=None)
-    parser.add_argument("--cache-dir", type=Path, default=Path("data/cache/vlm_names"))
+    parser.add_argument(
+        "--cache-dir", type=Path, default=Path("data/cache/vlm_names"),
+        help="Base dir for the VLM cache. Names are stored under <cache-dir>/<dataset>/ "
+             "(one subfolder per source dataset) so different datasets don't mix.",
+    )
     args = parser.parse_args()
 
     cfg = AppConfig.from_yaml(args.config) if args.config is not None else None
+
+    stem = dataset_stem(args.embeddings)
+    args.output = args.output or Path("models") / f"{stem}_feature_names.json"
+
     naming_cfg = cfg.naming if cfg else None
-    sae_cfg = cfg.sae if cfg else None
     n_features = args.n_features or (naming_cfg.n_features if naming_cfg else 20)
-    topk = args.topk if args.topk is not None else (sae_cfg.topk if sae_cfg else 0)
     ranking = args.ranking or (naming_cfg.ranking if naming_cfg else "diverse_mmr")
     lambda_mmr = args.lambda_mmr if args.lambda_mmr is not None else (
         naming_cfg.lambda_mmr if naming_cfg else 0.5
@@ -66,15 +64,10 @@ def main() -> None:
     crop_size = args.crop_size or (naming_cfg.crop_size if naming_cfg else 96)
     n_crops = args.n_crops or (naming_cfg.n_crops if naming_cfg else 8)
 
-    embeddings = np.load(args.embeddings).astype(np.float32)
+    embeddings = normalize_embeddings(np.load(args.embeddings).astype(np.float32))
     image_paths = json.loads(args.image_paths.read_text())
 
-    state = torch.load(args.sae_model, map_location="cpu", weights_only=True)
-    input_dim = embeddings.shape[1]
-    hidden_dim = state["encoder.weight"].shape[0]
-    sae = SparseAutoencoder(input_dim=input_dim, hidden_dim=hidden_dim, topk=topk)
-    sae.load_state_dict(state)
-    sae.eval()
+    sae = SparseAutoencoder.load(args.sae_model)
 
     batch_size = 1024
     all_acts = []
@@ -112,8 +105,10 @@ def main() -> None:
     from src.naming.spatial_localization import localize_feature_batch
     from src.naming.vlm_namer import VLMFeatureNamer
 
+    cache_dir = args.cache_dir / stem
+
     dino = DINOEncoder(use_patches=True)
-    vlm = VLMFeatureNamer(model=vlm_model, cache_dir=args.cache_dir)
+    vlm = VLMFeatureNamer(model=vlm_model, cache_dir=cache_dir)
 
     feature_info: dict[str, dict] = {}
     for fid in ranked_features:

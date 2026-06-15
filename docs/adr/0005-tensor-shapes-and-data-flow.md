@@ -43,10 +43,10 @@ The embeddings at this point are **not** L2-normalized. Normalization happens in
 
 **Script:** `scripts/train_sae.py`
 
-`EmbeddingDataset` loads the `.npy` file and serves one row per item. The SAE receives the raw (unnormalized) CLS tokens.
+`EmbeddingDataset` loads the `.npy` file and serves one row per item. By default each row is **L2-normalized** before being served (`normalize=True`), so the SAE trains on unit vectors. Pass `normalize=False` to train on raw CLS tokens. When `mmap=True` the array stays memory-mapped and rows are normalized lazily in `__getitem__`.
 
 ```
-batch from EmbeddingDataset             (B, 1024)   float32, raw
+batch from EmbeddingDataset             (B, 1024)   float32, L2-normalized
 
 encoder linear + bias:
   W_enc shape                           (8192, 1024)
@@ -69,9 +69,9 @@ loss terms:
 
 After each optimizer step (untied weights only), each column of `W_dec` is re-normalized to unit length. `W_dec` remains `(1024, 8192)` in shape; only the values change.
 
-Dead neuron tracking uses a counter `steps_since_active` of shape `(8192,)`. When a unit exceeds `dead_threshold_steps=1000` steps without firing, its encoder row `W_enc[i]` is replaced with `normalize(x − x̂)` from the current batch, and `b_enc[i]` is set to zero.
+Dead neuron tracking uses a counter `steps_since_active` of shape `(8192,)`. When a unit exceeds the effective dead threshold without firing, its encoder row `W_enc[i]` is replaced with `normalize(x − x̂)` from the current batch, `b_enc[i]` is set to zero, and the Adam moments for the revived rows are reset. The effective threshold is `min(dead_threshold_steps, 2 × steps_per_epoch)`; when the configured `dead_threshold_steps` (default 1000) is capped, a warning is logged.
 
-The best checkpoint (lowest validation reconstruction loss) is saved as `models/sae_best.pt`.
+The best checkpoint is saved as `models/{dataset}_sae_best.pt` (selected on the lowest validation **score**: reconstruction loss for TopK, or `recon + λ · sparsity` for ReLU). A sidecar `*.meta.json` stores `topk`/`tied_weights` so `SparseAutoencoder.load` can rebuild the model.
 
 ---
 
@@ -91,7 +91,7 @@ faiss.IndexFlatIP(1024)
   stored vectors inside index           (N, 1024)
 
 saved:
-  data/processed/index.faiss
+  data/processed/{dataset}_index.faiss
 ```
 
 If a SAE checkpoint is provided, corpus activations and a second index are also computed from the **normalized** embeddings.
@@ -106,7 +106,7 @@ concatenated:
   activations                           (N, 8192)   float32, sparse
 
 saved:
-  data/processed/activations.npy        (N, 8192)
+  data/processed/{dataset}_activations.npy   (N, 8192)
 
 per-vector normalize activations:
   norms                                 (N, 1)
@@ -116,10 +116,10 @@ faiss.IndexFlatIP(8192)
   sae_index.add(acts_normed)
 
 saved:
-  data/processed/sae_index.faiss
+  data/processed/{dataset}_sae_index.faiss
 ```
 
-Note: activations are computed from normalized embeddings even though the SAE was trained on raw ones. DINOv2 CLS tokens tend to have similar magnitudes across images, so the normalization effect is small in practice.
+Note: both training and activation pre-computation now operate on L2-normalized embeddings, so the SAE sees a consistent input distribution offline and at query time.
 
 ---
 
@@ -156,10 +156,10 @@ Assume `n_active` sliders are set (non-zero alpha values). Feature ids are indic
 ```
 slider_config = {fid_1: α_1, fid_2: α_2, ...}   n_active entries
 
-extract decoder directions:
-  W_dec                                 (1024, 8192)
-  W_dec[:, [fid_1, fid_2, ...]]  →      (1024, n_active)
-  transpose  →  directions              (n_active, 1024)   each row is a unit vector
+extract encoder directions:
+  W_enc                                 (8192, 1024)
+  W_enc[[fid_1, fid_2, ...]]  →         (n_active, 1024)
+  L2-normalize each row  →  directions  (n_active, 1024)   each row is a unit vector
 
 alphas array                            (n_active,)
 
@@ -185,21 +185,27 @@ index.search(q', fetch_k)  →
 ## Phase 6: optional SAE-space index merge
 
 ```
-encode steered query through SAE:
-  sae.encode(q'.reshape(1, -1))  →      (1, 8192)
+encode the UNsteered query through SAE:
+  sae.encode(q.reshape(1, -1))  →       (1, 8192)
   squeeze  →                            (8192,)
-  normalize  →                          (8192,)     unit vector in activation space
+
+bump the active features directly:
+  acts[fid] = max(0, acts[fid] + alpha)   for each active slider
+
+normalize  →                            (8192,)     unit vector in activation space
 
 sae_index.search(acts_normed, fetch_k)  →
   sae_distances                         (fetch_k,)
   sae_indices                           (fetch_k,)
 
 merge with DINO results:
-  score[i] = (1 − 0.3) · dino_sim[i] / max_dino
-           +       0.3  · sae_sim[i]  / max_sae
-
-  both score vectors normalized by their max before combining
-  result: merged scores dict  →  sorted  →  top fetch_k
+  if corpus_activations is available:
+    union the two candidate pools (deduped, DINO first); the activation
+    rerank in Phase 7 (same guard) recomputes the real ordering, so dists
+    here are only a descending placeholder.
+  else (RRF fallback):
+    score[i] = (1 − 0.3) / (60 + rank_dino[i]) + 0.3 / (60 + rank_sae[i])
+    sorted desc  →  top fetch_k
 
   idxs                                  (fetch_k,)
   dists                                 (fetch_k,)
@@ -218,7 +224,9 @@ alphas_arr                              (n_active,)
 sae_scores = (activations_slice * alphas_arr).sum(axis=1)
                                         (fetch_k,)   one score per candidate
 
-argsort descending  →  reorder idxs and dists by sae_scores
+argsort descending  →  reorder idxs by sae_scores
+                        dists are replaced by sae_scores (relevance, not
+                        cosine sim); the MMR pass uses them as its relevance term
 ```
 
 Images with high activation on positively-weighted features (and low activation on negatively-weighted ones) rise to the top.

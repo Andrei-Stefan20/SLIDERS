@@ -1,17 +1,17 @@
-"""Sparse Autoencoder for disentangling DINOv2 feature space."""
+import json
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class SparseAutoencoder(nn.Module):
-    """Single-layer SAE with ReLU or TopK activation.
+def _meta_path(checkpoint: Path | str) -> Path:
+    p = Path(checkpoint)
+    return p.parent / f"{p.stem}.meta.json"
 
-    topk > 0: exact K features active per sample (Gao et al., 2024)
-    topk = 0: ReLU + L1 penalty (default)
-    tied_weights: decoder uses encoder.weight.T
-    """
+
+class SparseAutoencoder(nn.Module):
 
     def __init__(
         self,
@@ -38,7 +38,11 @@ class SparseAutoencoder(nn.Module):
         nn.init.kaiming_uniform_(self.encoder.weight)
         nn.init.zeros_(self.encoder.bias)
         if not self.tied_weights:
-            nn.init.kaiming_uniform_(self.decoder.weight)
+            with torch.no_grad():
+                self.decoder.weight.copy_(self.encoder.weight.t())
+                self.decoder.weight.div_(
+                    self.decoder.weight.norm(dim=0, keepdim=True).clamp_min(1e-8)
+                )
             nn.init.zeros_(self.decoder.bias)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
@@ -58,3 +62,20 @@ class SparseAutoencoder(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         h = self.encode(x)
         return self.decode(h), h
+
+    def save_meta(self, checkpoint: Path | str) -> None:
+        _meta_path(checkpoint).write_text(
+            json.dumps({"topk": self.topk, "tied_weights": self.tied_weights})
+        )
+
+    @classmethod
+    def load(cls, checkpoint: Path | str) -> "SparseAutoencoder":
+        state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        tied = "decoder.weight" not in state
+        hidden_dim, input_dim = state["encoder.weight"].shape
+        meta = _meta_path(checkpoint)
+        topk = json.loads(meta.read_text()).get("topk", 0) if meta.exists() else 0
+        sae = cls(input_dim=input_dim, hidden_dim=hidden_dim, tied_weights=tied, topk=topk)
+        sae.load_state_dict(state)
+        sae.eval()
+        return sae

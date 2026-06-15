@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-import torch
 
 from src.datasets import get_adapter
 from src.encoders.dino_encoder import DINOEncoder
@@ -10,6 +9,7 @@ from src.models.sae import SparseAutoencoder
 from src.naming.feature_namer import rank_features_by_variance
 from src.retrieval.index import load_index
 from src.ui.state import AppState
+from src.utils.io import dataset_stem
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -91,33 +91,44 @@ def load_resources(
     n_sliders=20,
 ):
     if dataset is not None:
-        embeddings_path = Path(f"data/processed/{dataset}_embeddings.npy")
-        image_paths_json = Path(f"data/processed/{dataset}_image_paths.json")
-    else:
-        proc_dir = Path("data/processed")
-        if not embeddings_path.exists():
-            discovered = _discover_processed(proc_dir, "_embeddings.npy")
-            if discovered:
-                embeddings_path = discovered
-                stem = discovered.stem.replace("_embeddings", "")
-                image_paths_json = proc_dir / f"{stem}_image_paths.json"
-                logger.warning(f"Auto-discovered embeddings: {embeddings_path}")
+        proc = Path("data/processed")
+        embeddings_path = proc / f"{dataset}_embeddings.npy"
+        image_paths_json = proc / f"{dataset}_image_paths.json"
+        index_path = proc / f"{dataset}_index.faiss"
+        sae_path = Path("models") / f"{dataset}_sae_best.pt"
+    elif not embeddings_path.exists():
+        discovered = _discover_processed(Path("data/processed"), "_embeddings.npy")
+        if discovered:
+            embeddings_path = discovered
+            image_paths_json = discovered.parent / f"{dataset_stem(discovered)}_image_paths.json"
+            logger.warning(f"Auto-discovered embeddings: {embeddings_path}")
+
+    # Per-dataset prefix used to locate the pipeline artifacts on disk.
+    stem = dataset if dataset is not None else dataset_stem(embeddings_path)
 
     adapter_name = adapter_name or dataset or "generic"
     adapter = get_adapter(adapter_name)
 
     dino = DINOEncoder(use_patches=False)
 
-    sae_state = torch.load(sae_path, map_location="cpu", weights_only=True)
-    input_dim = sae_state["encoder.weight"].shape[1]
-    hidden_dim = sae_state["encoder.weight"].shape[0]
-    sae = SparseAutoencoder(input_dim=input_dim, hidden_dim=hidden_dim)
-    sae.load_state_dict(sae_state)
-    sae.eval()
+    sae = SparseAutoencoder.load(sae_path)
+
+    proc = embeddings_path.parent
+
+    def _pick(directory: Path, prefixed: str, legacy: str) -> Path:
+        # Prefer the prefixed name; use the legacy non-prefixed one otherwise.
+        cand = directory / prefixed
+        if cand.exists():
+            return cand
+        legacy_path = directory / legacy
+        return legacy_path if legacy_path.exists() else cand
+
+    sae_index_path = _pick(index_path.parent, f"{stem}_sae_index.faiss", "sae_index.faiss")
+    acts_path = _pick(proc, f"{stem}_activations.npy", "activations.npy")
+    names_path = _pick(sae_path.parent, f"{stem}_feature_names.json", "feature_names.json")
 
     index = load_index(index_path)
     sae_index = None
-    sae_index_path = index_path.parent / "sae_index.faiss"
     if sae_index_path.exists():
         sae_index = load_index(sae_index_path)
 
@@ -126,17 +137,15 @@ def load_resources(
     image_classes = _build_image_class_metadata(image_paths, adapter)
 
     activations = None
-    acts_path = embeddings_path.parent / "activations.npy"
     if acts_path.exists():
         activations = _load_array_smart(acts_path)
-
-    processed = Path("data/processed")
 
     class_directions = class_names = None
     feature_ids = feature_names = feature_descriptions = []
 
     dirs_found = _find_first([
-        (processed / "class_directions.npy", processed / "class_direction_names.json"),
+        (proc / f"{stem}_class_directions.npy", proc / f"{stem}_class_direction_names.json"),
+        (proc / "class_directions.npy", proc / "class_direction_names.json"),
     ])
     if dirs_found:
         dir_npy, dir_json = dirs_found
@@ -147,7 +156,6 @@ def load_resources(
         feature_descriptions = [""] * len(class_names)
         logger.info(f"Class directions: {len(class_names)} sliders")
     else:
-        names_path = sae_path.parent / "feature_names.json"
         if names_path.exists():
             all_names = json.loads(names_path.read_text())
             feature_ids = [int(k) for k in list(all_names.keys())[:n_sliders]]

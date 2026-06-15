@@ -1,20 +1,4 @@
-"""Compute class-level difference-in-means directions for any dataset.
-
-Direction mode depends on the adapter:
-  - "reference" : subcategory_mean - reference_class_mean  (e.g. PlantVillage: disease - healthy)
-  - "global"    : subcategory_mean - global_mean
-  - "one_vs_rest": subcategory_mean - mean(all other classes)
-
-Usage:
-    python scripts/compute_class_directions.py \\
-        --embeddings data/processed/<dataset>_embeddings.npy \\
-        --image-paths data/processed/<dataset>_image_paths.json \\
-        --adapter plantvillage \\
-        --output data/processed/
-"""
-
 # ruff: noqa: E402
-
 import argparse
 import json
 import sys
@@ -28,7 +12,7 @@ if str(ROOT) not in sys.path:
 
 from src.datasets import get_adapter
 from src.datasets.base import DatasetAdapter
-from src.utils.io import normalize_embeddings
+from src.utils.io import dataset_stem, normalize_embeddings
 
 MIN_SAMPLES = 5
 
@@ -38,7 +22,6 @@ def compute_reference_directions(
     embeddings: np.ndarray,
     image_paths: list[str],
 ) -> tuple[np.ndarray, list[str]]:
-    """Directions = subcategory_mean - reference_mean (per category)."""
     cat_sub: dict[tuple[str, str], list[int]] = {}
     cat_ref: dict[str, list[int]] = {}
 
@@ -78,7 +61,6 @@ def compute_global_directions(
     embeddings: np.ndarray,
     image_paths: list[str],
 ) -> tuple[np.ndarray, list[str]]:
-    """Directions = class_mean - global_mean."""
     class_indices: dict[str, list[int]] = {}
     for i, path in enumerate(image_paths):
         _, sub, _ = adapter.parse_path(path)
@@ -107,7 +89,6 @@ def compute_one_vs_rest_directions(
     embeddings: np.ndarray,
     image_paths: list[str],
 ) -> tuple[np.ndarray, list[str]]:
-    """Directions = class_mean - mean(all other classes)."""
     class_indices: dict[str, list[int]] = {}
     for i, path in enumerate(image_paths):
         _, sub, _ = adapter.parse_path(path)
@@ -161,13 +142,15 @@ def main() -> None:
     directions, names = fn(adapter, embeddings, image_paths)
 
     print(f"\nFound {len(names)} directions.")
+
+    stem = dataset_stem(args.embeddings)
     args.output.mkdir(parents=True, exist_ok=True)
-    np.save(args.output / "class_directions.npy", directions)
-    (args.output / "class_direction_names.json").write_text(
+    np.save(args.output / f"{stem}_class_directions.npy", directions)
+    (args.output / f"{stem}_class_direction_names.json").write_text(
         json.dumps(names, indent=2, ensure_ascii=False)
     )
-    print(f"Saved -> {args.output}/class_directions.npy")
-    print(f"Saved -> {args.output}/class_direction_names.json")
+    print(f"Saved -> {args.output}/{stem}_class_directions.npy")
+    print(f"Saved -> {args.output}/{stem}_class_direction_names.json")
 
 
 if __name__ == "__main__":

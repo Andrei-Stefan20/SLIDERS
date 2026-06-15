@@ -1,5 +1,3 @@
-"""SAE training loop."""
-
 from pathlib import Path
 
 import torch
@@ -13,6 +11,25 @@ from src.models.losses import cosine_reconstruction_loss, reconstruction_loss, s
 from src.models.sae import SparseAutoencoder
 from src.utils.device import get_device
 from src.utils.logging import get_logger
+
+
+def _reset_adam_rows(
+    optimizer: optim.Optimizer,
+    param: torch.Tensor,
+    mask: torch.Tensor,
+    dim: int = 0,
+) -> None:
+    state = optimizer.state.get(param)
+    if not state:
+        return
+    for key in ("exp_avg", "exp_avg_sq"):
+        buf = state.get(key)
+        if buf is None:
+            continue
+        if dim == 0:
+            buf[mask] = 0
+        else:
+            buf[:, mask] = 0
 
 
 def train_sae(
@@ -30,6 +47,7 @@ def train_sae(
     val_split: float = 0.1,
     patience: int = 10,
     dead_threshold_steps: int = 1000,
+    prefix: str = "",
 ) -> None:
     logger = get_logger(__name__)
     device = get_device()
@@ -60,13 +78,27 @@ def train_sae(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    best_path = output_dir / "sae_best.pt"
+    best_path = output_dir / f"{prefix}sae_best.pt"
 
     steps_since_active = torch.zeros(hidden_dim, dtype=torch.long, device=device)
     revive_gen = torch.Generator(device=device).manual_seed(1337)
-    best_val_loss = float("inf")
+    best_val_score = float("inf")
     epochs_without_improvement = 0
     step = 0
+
+    steps_per_epoch = max(1, len(train_loader))
+    auto_cap = 2 * steps_per_epoch
+    effective_dead_threshold = min(dead_threshold_steps, auto_cap)
+    if effective_dead_threshold < dead_threshold_steps:
+        logger.warning(
+            f"dead_threshold_steps={dead_threshold_steps} capped to {auto_cap} "
+            f"(2x steps/epoch={steps_per_epoch}); raise the dataset size or pass a "
+            f"smaller value to silence this."
+        )
+    logger.info(
+        f"Dead-feature threshold: {effective_dead_threshold} steps "
+        f"(~{effective_dead_threshold / steps_per_epoch:.1f} epochs)"
+    )
 
     recon_fn = cosine_reconstruction_loss if loss_type == "cosine" else reconstruction_loss
 
@@ -100,7 +132,7 @@ def train_sae(
                 steps_since_active[fired] = 0
                 steps_since_active[~fired] += 1
 
-                dead_mask = steps_since_active > dead_threshold_steps
+                dead_mask = steps_since_active > effective_dead_threshold
                 n_dead = int(dead_mask.sum().item())
                 if n_dead > 0:
                     residual = (x - x_hat).detach()
@@ -112,20 +144,26 @@ def train_sae(
                     sae.encoder.bias.data[dead_mask] = 0.0
                     if not tied_weights:
                         sae.decoder.weight.data[:, dead_mask] = new_dirs.T
+
+                    _reset_adam_rows(optimizer, sae.encoder.weight, dead_mask)
+                    _reset_adam_rows(optimizer, sae.encoder.bias, dead_mask)
+                    if not tied_weights:
+                        _reset_adam_rows(optimizer, sae.decoder.weight, dead_mask, dim=1)
                     steps_since_active[dead_mask] = 0
 
             epoch_losses.append(loss.item())
             step += 1
 
             if step % log_every == 0:
-                dead_ratio = float((steps_since_active > dead_threshold_steps).float().mean().item())
+                dead_ratio = float((steps_since_active > effective_dead_threshold).float().mean().item())
                 logger.info(
                     f"step {step:6d} | loss={loss.item():.4f} recon={recon.item():.4f} "
                     f"{'L0' if topk > 0 else 'sparse'}={sparse_display.item():.4f} dead={dead_ratio:.1%}"
                 )
 
         sae.eval()
-        val_total_loss = 0.0
+        val_recon_total = 0.0
+        val_sparse_total = 0.0
         val_l0_total = 0.0
         val_total_n = 0
         with torch.no_grad():
@@ -133,27 +171,35 @@ def train_sae(
                 x = batch.to(device)
                 x_hat, h = sae(x)
                 n = x.shape[0]
-                val_total_loss += recon_fn(x, x_hat).item() * n
+                val_recon_total += recon_fn(x, x_hat).item() * n
+                val_sparse_total += sparsity_loss(h).item() * n
                 val_l0_total += float((h > 0).float().sum().item())
                 val_total_n += n
 
-        val_loss = val_total_loss / val_total_n if val_total_n > 0 else float("inf")
+        val_recon = val_recon_total / val_total_n if val_total_n > 0 else float("inf")
         val_l0 = val_l0_total / val_total_n if val_total_n > 0 else 0.0
+
+        if topk > 0:
+            val_score = val_recon
+        else:
+            val_sparse = val_sparse_total / val_total_n if val_total_n > 0 else float("inf")
+            val_score = val_recon + lambda_sparsity * val_sparse
         train_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else float("inf")
-        dead_final = float((steps_since_active > dead_threshold_steps).float().mean().item())
+        dead_final = float((steps_since_active > effective_dead_threshold).float().mean().item())
 
         scheduler.step()
 
         logger.info(
-            f"Epoch {epoch}/{epochs} | train={train_loss:.4f} val={val_loss:.4f} "
-            f"val_L0={val_l0:.1f} dead={dead_final:.1%}"
+            f"Epoch {epoch}/{epochs} | train={train_loss:.4f} val={val_recon:.4f} "
+            f"score={val_score:.4f} val_L0={val_l0:.1f} dead={dead_final:.1%}"
         )
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_score < best_val_score:
+            best_val_score = val_score
             epochs_without_improvement = 0
             torch.save(sae.state_dict(), best_path)
-            logger.info(f"  Saved best model (val_loss={best_val_loss:.4f})")
+            sae.save_meta(best_path)
+            logger.info(f"  Saved best model (val_score={best_val_score:.4f})")
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= patience:
@@ -163,5 +209,7 @@ def train_sae(
                 )
                 break
 
-    torch.save(sae.state_dict(), output_dir / "sae_last.pt")
-    logger.info(f"Done. Best val loss: {best_val_loss:.4f}, saved to {best_path}")
+    last_path = output_dir / f"{prefix}sae_last.pt"
+    torch.save(sae.state_dict(), last_path)
+    sae.save_meta(last_path)
+    logger.info(f"Done. Best val score: {best_val_score:.4f}, saved to {best_path}")

@@ -8,6 +8,22 @@
 | Kaggle account | Needed to download PlantVillage |
 | Config file | Use `configs/plantvillage.yaml` by default |
 
+## One command
+
+After the environment is set up (step 0) and the raw data is in place, the whole
+pipeline runs in one go via the orchestrator. It retrains the SAE, names features,
+builds the index, computes class directions, evaluates on the held-out split, and
+generates the report — stopping at the first failure.
+
+```powershell
+.\scripts\run_pipeline.ps1
+```
+
+Useful switches: `-ExtractEmbeddings` to also re-extract embeddings first,
+`-StartUI` to launch the UI at the end, `-Topk 40` to set sparsity,
+`-SkipClassDirections`, and `-DryRun` to print the commands without running them.
+The steps below document each stage individually.
+
 ## Run order
 
 0. Install environment.
@@ -203,7 +219,52 @@ python scripts/compute_class_directions.py `
   --output data/processed/
 ```
 
-7. Start the UI.
+7. Evaluate before reporting any number.
+
+Run the full metric battery. Pass the **held-out val split** as queries so the
+numbers reflect generalization rather than in-sample self-retrieval.
+
+```powershell
+python scripts/evaluate.py `
+  --embeddings data/processed/plantvillage_train_embeddings.npy `
+  --image-paths data/processed/plantvillage_train_image_paths.json `
+  --index data/processed/plantvillage_train_index.faiss `
+  --sae-model models/plantvillage_train_sae_best.pt `
+  --query-embeddings data/processed/plantvillage_val_embeddings.npy `
+  --query-image-paths data/processed/plantvillage_val_image_paths.json `
+  --feature-names models/plantvillage_train_feature_names.json `
+  --class-directions data/processed/plantvillage_train_class_directions.npy `
+  --output reports/plantvillage_train_eval.json
+```
+
+The corpus flags `--embeddings`, `--image-paths` and `--index` are the **training**
+set the UI searches; the `--query-*` flags are the held-out queries. Omitting the
+query flags falls back to in-sample retrieval and prints a loud warning — those
+numbers are optimistic. `--feature-names` and `--class-directions` are optional and
+enable the CLIP-naming and class-direction-steering metrics. `--output` dumps every
+metric as JSON for the report in the next step. See
+[docs/EVALUATION.md](EVALUATION.md) for every metric, the k knobs, feature
+sampling, and the null baselines.
+
+8. Generate report figures.
+
+Produces a `reports/plantvillage_train/` folder with one subfolder per stage,
+each holding PNG figures plus the underlying CSV/JSON: embedding projection and
+class distribution, training curves and sparsity, top-activating montages per
+feature, the class-direction similarity heatmap, and the evaluation charts. Stages
+whose inputs are missing are skipped with a note, so it also runs mid-pipeline.
+
+```powershell
+python scripts/make_report.py `
+  --dataset plantvillage_train `
+  --eval-json reports/plantvillage_train_eval.json
+```
+
+Training curves need the `<dataset>_sae_history.json` written by `train_sae.py`, so
+they appear only after a fresh train; the evaluation charts need the `--output` JSON
+from step 7.
+
+9. Start the UI.
 
 ```powershell
 python -m src.api --config configs/plantvillage.yaml --host 127.0.0.1 --port 8000
@@ -222,9 +283,12 @@ All artifacts are prefixed with the dataset name (`dataset.name` in the config, 
 | `data/processed/plantvillage_val_embeddings.npy` | `extract_embeddings.py` | evaluation |
 | `data/processed/plantvillage_val_image_paths.json` | `extract_embeddings.py` | evaluation |
 | `models/plantvillage_train_sae_best.pt` (+ `.meta.json`) | `train_sae.py` | feature naming, index build, UI |
+| `models/plantvillage_train_sae_history.json` | `train_sae.py` | report training curves |
 | `models/plantvillage_train_feature_names.json` | `name_features.py` | UI slider labels |
 | `data/processed/plantvillage_train_index.faiss` | `build_index.py` | FAISS search |
 | `data/processed/plantvillage_train_sae_index.faiss` | `build_index.py --sae-model` | optional SAE-space result merge |
 | `data/processed/plantvillage_train_activations.npy` | `build_index.py --sae-model` | slider reranking, previews, automatic labels |
 | `data/processed/plantvillage_train_class_directions.npy` | `compute_class_directions.py` | optional class sliders |
 | `data/processed/plantvillage_train_class_direction_names.json` | `compute_class_directions.py` | optional class slider labels |
+| `reports/plantvillage_train_eval.json` | `evaluate.py --output` | report evaluation charts |
+| `reports/plantvillage_train/` | `make_report.py` | figures + data tables for the report |

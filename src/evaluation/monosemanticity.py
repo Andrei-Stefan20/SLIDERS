@@ -12,23 +12,11 @@ def monosemanticity_score(
     image_paths: list[str],
     feature_id: int,
     k: int = 20,
+    n_total_classes: int | None = None,
 ) -> dict:
-    """Compute class-purity score for one SAE feature.
-
-    A monosemantic feature activates predominantly on one class.
-    Score 1.0 = all top-k images from the same class.
-    Score 0.0 = top-k images distributed uniformly across all classes.
-
-    Args:
-        activations: Shape (N, hidden_dim).
-        image_paths: Length-N list of image path strings.
-        feature_id: Which feature to score.
-        k: How many top-activating images to examine.
-
-    Returns:
-        Dict with keys: feature_id, purity_score, dominant_class,
-        dominant_class_fraction, n_classes_in_top_k, entropy.
-    """
+    """Class purity of a feature's top-k images. 1.0 = all one class, 0.0 = spread
+    evenly. Pass n_total_classes to normalise entropy by the dataset's class count
+    (comparable across features); without it, falls back to the observed classes."""
     feature_acts = activations[:, feature_id]
     top_idx = np.argsort(feature_acts)[::-1][:k]
 
@@ -38,8 +26,10 @@ def monosemanticity_score(
     total = sum(counts.values())
     probs = [c / total for c in counts.values()]
     entropy = -sum(p * math.log(p + 1e-8) for p in probs)
-    max_entropy = math.log(len(counts)) if len(counts) > 1 else 1.0
+    n_ref = n_total_classes if n_total_classes and n_total_classes > 1 else len(counts)
+    max_entropy = math.log(n_ref) if n_ref > 1 else 1.0
     purity = 1.0 if max_entropy <= 0 else 1.0 - entropy / max_entropy
+    purity = float(max(0.0, min(1.0, purity)))
     dominant_class, dominant_count = counts.most_common(1)[0]
 
     return {
@@ -57,10 +47,11 @@ def batch_monosemanticity(
     image_paths: list[str],
     feature_ids: list[int],
     k: int = 20,
+    n_total_classes: int | None = None,
 ) -> list[dict]:
     """Compute monosemanticity scores for multiple features."""
     return [
-        monosemanticity_score(activations, image_paths, fid, k)
+        monosemanticity_score(activations, image_paths, fid, k, n_total_classes)
         for fid in feature_ids
     ]
 
@@ -70,3 +61,32 @@ def mean_purity(scores: list[dict]) -> float:
     if not scores:
         return 0.0
     return float(np.mean([s["purity_score"] for s in scores]))
+
+
+def n_distinct_classes(image_paths: list[str]) -> int:
+    """Number of distinct parent-folder class labels in the corpus."""
+    return len({PurePath(p).parent.name for p in image_paths})
+
+
+def shuffled_label_purity_baseline(
+    activations: np.ndarray,
+    image_paths: list[str],
+    feature_ids: list[int],
+    k: int = 20,
+    n_total_classes: int | None = None,
+    n_shuffles: int = 5,
+    seed: int = 0,
+) -> list[float]:
+    """Chance-level purity under shuffled labels — one value per shuffle. Real
+    purity only means something as the gap above this."""
+    rng = np.random.default_rng(seed)
+    paths = list(image_paths)
+    out: list[float] = []
+    for _ in range(n_shuffles):
+        # shuffle paths, not labels: monosemanticity_score reads the class off the path
+        permuted = [paths[j] for j in rng.permutation(len(paths))]
+        scores = batch_monosemanticity(
+            activations, permuted, feature_ids, k, n_total_classes
+        )
+        out.append(mean_purity(scores))
+    return out

@@ -33,6 +33,23 @@ class TestSparseAutoencoderShapes:
         assert x_hat.shape == (4, input_dim)
 
 
+class TestFeatureDirections:
+    def test_untied_uses_unit_decoder_columns(self, input_dim, hidden_dim):
+        # the steering atom is the decoder column, not the encoder row (docs/adr/0002)
+        sae = SparseAutoencoder(input_dim=input_dim, hidden_dim=hidden_dim, tied_weights=False)
+        dirs = sae.feature_directions([0, 3])
+        assert dirs.shape == (2, input_dim)
+        expected = torch.nn.functional.normalize(sae.decoder.weight.detach().t()[[0, 3]], dim=-1)
+        assert torch.allclose(dirs, expected, atol=1e-6)
+        assert torch.allclose(dirs.norm(dim=-1), torch.ones(2), atol=1e-6)
+
+    def test_tied_uses_encoder_rows(self, input_dim, hidden_dim):
+        sae = SparseAutoencoder(input_dim=input_dim, hidden_dim=hidden_dim, tied_weights=True)
+        dirs = sae.feature_directions([1])
+        expected = torch.nn.functional.normalize(sae.encoder.weight.detach()[[1]], dim=-1)
+        assert torch.allclose(dirs, expected, atol=1e-6)
+
+
 class TestReLUActivation:
     def test_hidden_non_negative(self, small_sae, input_dim):
         x = torch.randn(16, input_dim)

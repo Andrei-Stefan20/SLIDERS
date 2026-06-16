@@ -33,6 +33,9 @@ def _pca_direction_faithfulness(
     k: int = 20,
     n_queries: int = 100,
 ) -> float:
+    """Cosine lift (steered minus unsteered) of retrieved items toward direction.
+    >0 = steering works. Lift not ratio: cosine is signed, a ratio flips/explodes
+    near zero. Same metric for any unit direction (PCA or SAE), so they compare."""
     from src.retrieval.query import search
     from src.retrieval.steering import steer_query
 
@@ -52,9 +55,7 @@ def _pca_direction_faithfulness(
         scores_base.append(sim_base)
         scores_steer.append(sim_steer)
 
-    baseline = float(np.mean(scores_base))
-    steered = float(np.mean(scores_steer))
-    return steered / (baseline + 1e-8)
+    return float(np.mean(scores_steer)) - float(np.mean(scores_base))
 
 
 def evaluate_pca_baseline(
@@ -66,16 +67,8 @@ def evaluate_pca_baseline(
     k: int = 20,
     n_queries: int = 100,
 ) -> dict:
-    """Compute mean steering faithfulness using PCA directions as a baseline.
-
-    Compare this number against the SAE steering faithfulness score:
-    - SAE score >> PCA score: SAE adds interpretable steering value
-    - SAE score ~= PCA score: SAE is no better than linear PCA decomposition
-
-    Returns:
-        Dict with keys: pca_mean_faithfulness, pca_per_component (list of floats),
-        n_components, explained_variance_ratio.
-    """
+    """Per-component steering lift for the top PCA directions — the baseline
+    evaluate_sae_vs_pca measures SAE features against with the same metric."""
     directions = pca_directions(corpus_embeddings, n_components)
 
     centered = corpus_embeddings - corpus_embeddings.mean(axis=0)
@@ -99,6 +92,11 @@ def evaluate_pca_baseline(
     }
 
 
+def _sae_feature_direction(sae: "SparseAutoencoder", feature_id: int) -> np.ndarray:
+    """A feature's unit-norm decoder column — the direction search_with_sliders steers along."""
+    return sae.feature_directions([feature_id])[0].cpu().numpy()
+
+
 def evaluate_sae_vs_pca(
     sae: "SparseAutoencoder",
     index: "faiss.Index",
@@ -111,29 +109,32 @@ def evaluate_sae_vs_pca(
     k: int = 20,
     n_queries: int = 100,
 ) -> dict:
-    """Full ablation: SAE steering faithfulness vs PCA baseline.
-
-    Returns:
-        Dict with sae_mean_faithfulness, pca_mean_faithfulness,
-        improvement_ratio (SAE/PCA), and per-feature details.
-    """
-    from src.evaluation.steering_faithfulness import batch_steering_faithfulness
-
-    sae_scores = batch_steering_faithfulness(
-        sae, index, corpus_activations, query_embs,
-        feature_ids, alpha, k, n_queries,
-    )
-    sae_mean = float(np.mean(list(sae_scores.values()))) if sae_scores else 0.0
+    """SAE vs PCA steering, same cosine-lift metric for both. Headline is
+    steering_advantage = SAE median lift - PCA median lift (>0 = SAE steers better
+    than raw PCs). Median, since signed lifts can have outlier queries."""
+    sae_per_feature = [
+        _pca_direction_faithfulness(
+            index, corpus_embeddings, _sae_feature_direction(sae, fid),
+            query_embs, alpha, k, n_queries,
+        )
+        for fid in feature_ids
+    ]
+    sae_mean = float(np.mean(sae_per_feature)) if sae_per_feature else 0.0
+    sae_median = float(np.median(sae_per_feature)) if sae_per_feature else 0.0
 
     pca_result = evaluate_pca_baseline(
         index, corpus_embeddings, query_embs, n_pca_components, alpha, k, n_queries
     )
     pca_mean = pca_result["pca_mean_faithfulness"]
+    pca_median = float(np.median(pca_result["pca_per_component"]))
 
     return {
         "sae_mean_faithfulness": sae_mean,
+        "sae_median_faithfulness": sae_median,
         "pca_mean_faithfulness": pca_mean,
-        "improvement_ratio": sae_mean / (pca_mean + 1e-8),
-        "sae_per_feature": sae_scores,
+        "pca_median_faithfulness": pca_median,
+        "steering_advantage": sae_median - pca_median,
+        "steering_advantage_mean": sae_mean - pca_mean,
+        "sae_per_feature": dict(zip(feature_ids, sae_per_feature)),
         "pca_result": pca_result,
     }

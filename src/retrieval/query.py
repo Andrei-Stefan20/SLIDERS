@@ -110,11 +110,7 @@ def search_with_sliders(
     else:
         alphas = list(raw_alphas)
 
-    encoder_weight = sae_model.encoder.weight.detach().cpu().numpy()
-    directions = encoder_weight[feature_ids]
-    # Encoder rows aren't unit-norm; normalize so alpha has a consistent scale.
-    dir_norms = np.linalg.norm(directions, axis=1, keepdims=True)
-    directions = directions / np.where(dir_norms > 1e-8, dir_norms, 1.0)
+    directions = sae_model.feature_directions(feature_ids).cpu().numpy()
     steered = steer_query(query_emb, directions, alphas)
 
     fetch_k = max(k * 3, 60) if (corpus_activations is not None or corpus_embeddings is not None) else k

@@ -59,6 +59,18 @@ class SparseAutoencoder(nn.Module):
             return h @ self.encoder.weight + self.decoder_bias
         return self.decoder(h)
 
+    def feature_directions(self, feature_ids=None) -> torch.Tensor:
+        """Concept directions in input space: the decoder columns (dictionary atoms
+        the slider adds to the query). For tied weights the atom is the encoder row.
+        Rows are unit-norm so alpha scales the same across features. See docs/adr/0002."""
+        if self.tied_weights:
+            dirs = self.encoder.weight.detach()
+        else:
+            dirs = self.decoder.weight.detach().t()  # (hidden_dim, input_dim)
+        if feature_ids is not None:
+            dirs = dirs[feature_ids]
+        return F.normalize(dirs, dim=-1)
+
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         h = self.encode(x)
         return self.decode(h), h

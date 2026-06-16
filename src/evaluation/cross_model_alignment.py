@@ -83,9 +83,16 @@ def reverse_retrieval_score(
         Jaccard overlap in [0, 1]. 0 = no overlap, 1 = perfect overlap.
     """
     rng = np.random.default_rng(42)
+    positive_set = {str(p) for p in top_image_paths}
     if len(all_image_paths) > sample_size:
         idxs = rng.choice(len(all_image_paths), size=sample_size, replace=False).tolist()
         sampled_paths = [all_image_paths[i] for i in idxs]
+        # keep the positives in the pool, else Jaccard is biased toward 0
+        present = {str(p) for p in sampled_paths}
+        for p in all_image_paths:
+            if str(p) in positive_set and str(p) not in present:
+                sampled_paths.append(p)
+                present.add(str(p))
     else:
         sampled_paths = list(all_image_paths)
         idxs = list(range(len(all_image_paths)))

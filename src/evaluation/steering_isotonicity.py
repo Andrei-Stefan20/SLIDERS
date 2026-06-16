@@ -42,10 +42,8 @@ def steering_isotonicity(
     for alpha in alphas:
         mean_acts = []
         for q in queries:
-            _, idxs = search_with_sliders(
-                index, q, sae, {feature_id: alpha}, k=k,
-                corpus_activations=corpus_activations,
-            )
+            # pure steering: a corpus_activations rerank would force monotonicity
+            _, idxs = search_with_sliders(index, q, sae, {feature_id: alpha}, k=k)
             mean_acts.append(float(corpus_activations[idxs, feature_id].mean()))
         alpha_means[alpha] = float(np.mean(mean_acts)) / corpus_mean
 

@@ -102,6 +102,8 @@ def train_sae(
 
     recon_fn = cosine_reconstruction_loss if loss_type == "cosine" else reconstruction_loss
 
+    history: list[dict] = []
+
     for epoch in range(1, epochs + 1):
         sae.train()
         epoch_losses: list[float] = []
@@ -194,6 +196,11 @@ def train_sae(
             f"score={val_score:.4f} val_L0={val_l0:.1f} dead={dead_final:.1%}"
         )
 
+        history.append({
+            "epoch": epoch, "train_loss": train_loss, "val_recon": val_recon,
+            "val_score": val_score, "val_l0": val_l0, "dead_frac": dead_final,
+        })
+
         if val_score < best_val_score:
             best_val_score = val_score
             epochs_without_improvement = 0
@@ -212,4 +219,8 @@ def train_sae(
     last_path = output_dir / f"{prefix}sae_last.pt"
     torch.save(sae.state_dict(), last_path)
     sae.save_meta(last_path)
+
+    import json
+    history_path = output_dir / f"{prefix}sae_history.json"
+    history_path.write_text(json.dumps(history, indent=2))
     logger.info(f"Done. Best val score: {best_val_score:.4f}, saved to {best_path}")

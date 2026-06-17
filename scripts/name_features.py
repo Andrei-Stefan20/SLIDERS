@@ -77,17 +77,21 @@ def main() -> None:
             all_acts.append(sae.encode(batch).numpy())
     activations = np.concatenate(all_acts, axis=0)
 
+    # Diversify sliders by semantic fingerprint (mean embedding of each feature's top
+    # images): features that fire on visually similar images would get the same VLM name,
+    # which activation-correlation diversity misses.
     if ranking == "diverse_mmr":
         from src.naming.feature_ranking import rank_diverse_mmr
         ranked_features = rank_diverse_mmr(
-            activations, n_features=n_features, lambda_mmr=lambda_mmr
+            activations, n_features=n_features, lambda_mmr=lambda_mmr, embeddings=embeddings
         )
     elif ranking == "selectivity":
         from pathlib import PurePath
         from src.naming.feature_ranking import rank_by_selectivity_mmr
         class_labels = np.array([PurePath(p).parent.name for p in image_paths])
         ranked_features = rank_by_selectivity_mmr(
-            activations, class_labels, n_features=n_features, lambda_mmr=lambda_mmr
+            activations, class_labels, n_features=n_features, lambda_mmr=lambda_mmr,
+            embeddings=embeddings,
         )
     elif ranking == "sparsity":
         from src.naming.feature_ranking import compute_sparsity
@@ -111,11 +115,17 @@ def main() -> None:
     vlm = VLMFeatureNamer(model=vlm_model, cache_dir=cache_dir)
 
     feature_info: dict[str, dict] = {}
+    used_names: set[str] = set()
     for fid in ranked_features:
         fi = get_top_images(activations, image_paths, fid, k=n_crops)
         top_crops = localize_feature_batch(fi.top_paths, dino, sae, fid, crop_size)
         bot_crops = localize_feature_batch(fi.bottom_paths, dino, sae, fid, crop_size)
         name, desc = vlm.name_feature(top_crops, bot_crops)
+        # If a distinct feature got an already-used name, re-name it contrastively so the
+        # sliders read as different concepts ("undifferentiated" is allowed to repeat).
+        if name != "undifferentiated" and name in used_names:
+            name, desc = vlm.name_feature(top_crops, bot_crops, avoid_names=sorted(used_names))
+        used_names.add(name)
         feature_info[str(fid)] = {"name": name, "description": desc}
         print(f"  feature {fid:5d} -> {name!r}")
         print(f"             {desc}")

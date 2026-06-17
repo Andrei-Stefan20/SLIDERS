@@ -13,6 +13,7 @@ from src.evaluation.monosemanticity import (
 )
 from src.evaluation.stats import bootstrap_ci, summarize
 from src.evaluation.steering_faithfulness import steering_faithfulness
+from src.evaluation.steering_selectivity import steering_selectivity
 from src.models.sae import SparseAutoencoder
 from src.retrieval.index import build_index
 
@@ -125,6 +126,19 @@ class TestSteeringFaithfulnessBaseline:
         live = int(np.argmax(acts.var(0)))
         f = steering_faithfulness(sae, index, acts, embs[:10], live, alpha=0.0, k=5, n_queries=10)
         assert abs(f - 1.0) < 1e-3
+
+
+class TestSteeringSelectivity:
+    def test_on_target_fraction_in_unit_range(self):
+        embs, _ = _clustered_corpus()
+        index = build_index(embs)
+        sae = SparseAutoencoder(input_dim=32, hidden_dim=16)
+        sae.eval()
+        with torch.no_grad():
+            acts = sae.encode(torch.from_numpy(embs)).numpy()
+        live = int(np.argmax(acts.var(0)))
+        s = steering_selectivity(sae, index, acts, embs[:10], live, alpha=2.0, k=5, n_queries=10)
+        assert np.isnan(s) or 0.0 <= s <= 1.0
 
 
 class TestAblationLiftIsBounded:

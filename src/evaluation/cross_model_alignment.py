@@ -21,6 +21,7 @@ def cross_model_alignment(
     top_image_paths: list[Path | str],
     validator_model: str = "ViT-B-32",
     validator_pretrained: str = "openai",
+    validator: "CLIPEncoder | None" = None,
 ) -> float:
     """Validate a feature name using a different CLIP model.
 
@@ -33,13 +34,16 @@ def cross_model_alignment(
         top_image_paths: Top-activating images for this feature.
         validator_model: open-clip model identifier (default ViT-B-32).
         validator_pretrained: Pretrained weights tag.
+        validator: Pre-built encoder to reuse across calls; built from
+            validator_model/pretrained if None (loading CLIP is slow, so batch
+            callers should pass one).
 
     Returns:
         Mean cosine similarity in [-1, 1]. Higher is better.
     """
-    from src.encoders.clip_encoder import CLIPEncoder
-
-    validator = CLIPEncoder(model_name=validator_model, pretrained=validator_pretrained)
+    if validator is None:
+        from src.encoders.clip_encoder import CLIPEncoder
+        validator = CLIPEncoder(model_name=validator_model, pretrained=validator_pretrained)
     text_emb = validator.encode_text([feature_name]).squeeze(0)
 
     similarities: list[float] = []
@@ -142,9 +146,13 @@ def batch_cross_validation(
         List of result dicts with keys: feature_id, name, cross_model_score,
         reverse_retrieval_score.
     """
+    from src.encoders.clip_encoder import CLIPEncoder
+    validator = CLIPEncoder(model_name=validator_model, pretrained="openai")
+
     results = []
     for nf in named_features:
-        cross = cross_model_alignment(nf["name"], nf["top_paths"], validator_model)
+        cross = cross_model_alignment(nf["name"], nf["top_paths"], validator_model,
+                                      validator=validator)
         reverse = reverse_retrieval_score(
             nf["name"], nf["top_paths"], all_image_paths, generator_clip, k=k
         )

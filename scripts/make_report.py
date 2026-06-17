@@ -32,6 +32,14 @@ def _label(path: str) -> str:
     return Path(path).parent.name
 
 
+def _feature_name(names: dict | None, fid: int) -> str:
+    """Name string for a feature; feature_names.json stores {name, description} dicts."""
+    v = (names or {}).get(str(fid))
+    if isinstance(v, dict):
+        return v.get("name", "")
+    return v or ""
+
+
 def _write_csv(path: Path, header: list[str], rows: list[list]) -> None:
     with path.open("w", newline="") as f:
         w = csv.writer(f)
@@ -168,10 +176,15 @@ def _montage(paths: list[str], acts: list[float], thumb: int = 110) -> Image.Ima
 
 
 def stage_features(out: Path, acts: np.ndarray, paths: list[str], names: dict | None,
-                   n_features: int, montage_k: int) -> None:
+                   n_features: int, montage_k: int, sae=None) -> None:
     print("\n[2] Feature naming / top images")
     var = _activation_stats(acts)["var"]
-    top_feats = [int(i) for i in np.argsort(var)[::-1] if var[i] > 0][:n_features]
+    # The sliders are the named features (diverse_mmr); fall back to top-variance if
+    # naming hasn't run. The redundancy heatmap is only meaningful on the actual sliders.
+    if names:
+        top_feats = [int(k) for k in names.keys()][:n_features]
+    else:
+        top_feats = [int(i) for i in np.argsort(var)[::-1] if var[i] > 0][:n_features]
     cols = np.asarray(acts[:, top_feats], dtype=np.float32)  # N x n_features
 
     table = []
@@ -180,7 +193,7 @@ def stage_features(out: Path, acts: np.ndarray, paths: list[str], names: dict | 
         order = np.argsort(col)[::-1][:montage_k]
         tpaths = [paths[i] for i in order]
         tacts = [float(col[i]) for i in order]
-        name = (names or {}).get(str(fid), "")
+        name = _feature_name(names, fid)
         _montage(tpaths, tacts).save(out / f"feature_{fid:05d}_top.png")
         table.append([fid, name, _label(tpaths[0]), f"{tacts[0]:.3f}", f"{float(var[fid]):.4f}"])
     print(f"  wrote {len(top_feats)} montages")
@@ -188,6 +201,25 @@ def stage_features(out: Path, acts: np.ndarray, paths: list[str], names: dict | 
                ["feature_id", "name", "top1_class", "top1_activation", "variance"], table)
     if names is None:
         print("  (no feature_names.json -> montages unlabeled; run name_features.py)")
+
+    # Redundancy: cosine between the shown features' decoder directions. High off-diagonal
+    # blocks = duplicate sliders (e.g. several "leaf edge" features pointing the same way).
+    if sae is not None:
+        dirs = sae.feature_directions(top_feats).cpu().numpy()
+        sim = dirs @ dirs.T
+        labels = [f"{fid}:{_feature_name(names, fid)[:18]}" for fid in top_feats]
+        fig, ax = plt.subplots(figsize=(max(6, len(top_feats) * 0.4), max(5, len(top_feats) * 0.38)))
+        im = ax.imshow(sim, cmap="RdBu_r", vmin=-1, vmax=1)
+        ax.set_xticks(range(len(top_feats))); ax.set_xticklabels(labels, rotation=90, fontsize=7)
+        ax.set_yticks(range(len(top_feats))); ax.set_yticklabels(labels, fontsize=7)
+        ax.set_title("Feature decoder-direction cosine (redundancy)")
+        fig.colorbar(im, ax=ax, fraction=0.046)
+        _save(fig, out / "feature_direction_similarity.png")
+        offdiag = sim[~np.eye(len(top_feats), dtype=bool)]
+        _write_csv(out / "feature_direction_similarity.csv",
+                   ["", *labels], [[labels[i], *[f"{v:.3f}" for v in sim[i]]] for i in range(len(top_feats))])
+        print(f"  redundancy: max off-diagonal cosine={offdiag.max():.3f}, "
+              f"frac>0.7={float((offdiag > 0.7).mean()):.0%}")
 
 
 # --------------------------------------------------------------------------- [3]
@@ -266,21 +298,46 @@ def stage_evaluation(out: Path, eval_json: Path) -> None:
         _save(_dist_fig(vals, "Targeted class delta-recall", "steered - unsteered recall",
                         0.0, "no effect (0)"), out / "targeted_recall.png")
 
+    if "steering_selectivity" in r:
+        vals = [v for v in r["steering_selectivity"]["per_feature"].values() if v is not None]
+        if vals:
+            _save(_dist_fig(vals, "Steering selectivity", "on-target fraction (lift on own feature)",
+                            0.5, "0.5"), out / "steering_selectivity.png")
+
+    if "retrieval_comparison" in r:
+        comp = r["retrieval_comparison"]
+        methods = list(comp.keys())
+        p5 = [comp[m].get("P@5", 0.0) for m in methods]
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.bar([mm.split(" (")[0] for mm in methods], p5,
+               color=["#4c72b0", "#c44e52", "#55a868"][:len(methods)])
+        ax.set_ylabel("P@5"); ax.set_title("Retrieval precision: unsteered vs PCA vs SAE steering")
+        for i, v in enumerate(p5):
+            ax.text(i, v, f"{v:.3f}", ha="center", va="bottom", fontsize=9)
+        _save(fig, out / "retrieval_comparison.png")
+
     if "ablation" in r:
         ab = r["ablation"]
+        # honest framing: pair the (misleading) cosine lift with the steered P@5.
+        comp = r.get("retrieval_comparison", {})
+        sae_p5 = next((v.get("P@5") for k, v in comp.items() if k.startswith("SAE")), None)
+        pca_p5 = next((v.get("P@5") for k, v in comp.items() if k.startswith("PCA")), None)
         fig, ax = plt.subplots(figsize=(6, 4))
         bars = ["SAE", "PCA"]
         ax.bar(bars, [ab["sae_median_faithfulness"], ab["pca_median_faithfulness"]],
                color=["#55a868", "#c44e52"])
         ax.axhline(0, color="black", linewidth=0.8)
-        ax.set_title(f"Median steering lift (SAE advantage={ab['steering_advantage']:+.4f})")
+        sub = ""
+        if sae_p5 is not None and pca_p5 is not None:
+            sub = f"\nbut steered P@5: SAE={sae_p5:.3f} vs PCA={pca_p5:.3f}"
+        ax.set_title(f"Median cosine lift (PCA higher = moves more, not better){sub}")
         ax.set_ylabel("cosine lift (steered - unsteered)")
         _save(fig, out / "sae_vs_pca.png")
 
     # flat summary table of every distribution metric
     rows = []
-    for key in ("faithfulness", "isotonicity", "targeted_recall", "monosemanticity",
-                "clip_alignment", "direction_steering"):
+    for key in ("faithfulness", "steering_selectivity", "isotonicity", "targeted_recall",
+                "monosemanticity", "clip_alignment", "direction_steering"):
         s = r.get(key, {}).get("summary")
         if s:
             rows.append([key, f"{s['mean']:.4f}", f"{s['median']:.4f}",
@@ -296,6 +353,8 @@ def main() -> None:
     ap.add_argument("--data-dir", type=Path, default=Path("data/processed"))
     ap.add_argument("--models-dir", type=Path, default=Path("models"))
     ap.add_argument("--eval-json", type=Path, default=None, help="metrics JSON from evaluate.py --output")
+    ap.add_argument("--sae-model", type=Path, default=None,
+                    help="Default: models/<dataset>_sae_best.pt. Enables the redundancy heatmap.")
     ap.add_argument("--output-dir", type=Path, default=None)
     ap.add_argument("--n-feature-montages", type=int, default=12)
     ap.add_argument("--montage-k", type=int, default=8)
@@ -319,11 +378,17 @@ def main() -> None:
     names_path = m / f"{ds}_feature_names.json"
     names = json.loads(names_path.read_text()) if names_path.exists() else None
 
+    sae_path = args.sae_model or (m / f"{ds}_sae_best.pt")
+    sae = None
+    if sae_path.exists():
+        from src.models.sae import SparseAutoencoder
+        sae = SparseAutoencoder.load(sae_path)
+
     stage_embeddings(stages["00_embeddings"], embs, paths, args.seed, args.max_projection_points)
     stage_training(stages["01_training"], m / f"{ds}_sae_history.json", acts)
     if acts is not None:
         stage_features(stages["02_features"], acts, paths, names,
-                       args.n_feature_montages, args.montage_k)
+                       args.n_feature_montages, args.montage_k, sae=sae)
     else:
         print("\n[2] SKIP features: no activations on disk (run build_index.py --sae-model)")
     stage_class_directions(stages["03_class_directions"],

@@ -159,16 +159,28 @@ class VLMFeatureNamer:
         top_crops: list[Image.Image],
         bottom_crops: list[Image.Image],
         verify: bool = True,
+        avoid_names: list[str] | None = None,
     ) -> tuple[str, str]:
-        """Return (name, description) for a feature identified contrastively."""
+        """Return (name, description) for a feature identified contrastively.
+
+        avoid_names: names already given to other features. When set, the VLM is asked for
+        a distinct, more specific name (the cache is bypassed since the prompt differs)."""
         import re
 
-        cache_path = self._cache_path(top_crops, bottom_crops)
+        # avoid_names changes the prompt and is run-specific, so skip the crop-keyed cache.
+        cache_path = None if avoid_names else self._cache_path(top_crops, bottom_crops)
         if cache_path and cache_path.exists():
             cached = json.loads(cache_path.read_text())
             return cached["name"], cached["description"]
 
-        messages = self._build_messages(top_crops, bottom_crops, CONTRASTIVE_PROMPT)
+        prompt = CONTRASTIVE_PROMPT
+        if avoid_names:
+            prompt += (
+                "\n\nThese names are ALREADY used by other features. Choose a DIFFERENT, "
+                "more specific name that distinguishes this feature from them:\n- "
+                + "\n- ".join(avoid_names)
+            )
+        messages = self._build_messages(top_crops, bottom_crops, prompt)
         raw = self._generate(messages, max_new_tokens=80)
         name, desc = self._parse(raw)
 

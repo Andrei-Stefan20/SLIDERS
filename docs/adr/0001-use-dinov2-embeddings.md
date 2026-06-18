@@ -6,7 +6,7 @@ Retrieval, SAE training, and class directions all share the same embedding space
 
 ## Decision
 
-Use DINOv2 ViT-L/14 loaded via `torch.hub.load("facebookresearch/dinov2", "dinov2_vitl14")`. Store one CLS token per image as a 1024-d float32 vector in `data/processed/<dataset>_embeddings.npy`. Patch tokens are extracted separately only during the feature naming step, for spatial crop localization.
+Use DINOv2 ViT-L/14 loaded via `torch.hub.load("facebookresearch/dinov2", "dinov2_vitl14")`. Store one CLS token per image as a 1024-d float32 vector in `data/processed/<dataset>_embeddings.npy`. Patch tokens are used in two cases: the feature-naming step (spatial crop localization), and the optional patch-level SAE (`--use-patches`), where the SAE trains on the patch tokens themselves to learn local, region-level features instead of global CLS concepts. Patch extraction loads the registers variant `dinov2_vitl14_reg`, which absorbs the high-norm artifact patches that would otherwise become spurious SAE features; the CLS retrieval path keeps the plain `dinov2_vitl14` so existing CLS artifacts are unaffected.
 
 The preprocessing pipeline is `Resize(256) → CenterCrop(224) → ToTensor() → ImageNet normalize`.
 
@@ -15,14 +15,15 @@ Corpus extraction path
 raw image → 224×224 tensor → DINOv2 CLS token → (B, 1024) → .npy
 ```
 
-Localization path (naming only)
+Localization path (naming)
 ```
 224×224 tensor → patch tokens (B, 256, 1024)  [16×16 grid, 14px patches]
               → SAE encoder per patch → (256, 8192)
-              → argmax on feature_id → center patch → 96px crop
+              → top-N patches on feature_id → 96px context crops, active patch outlined
+              → montage per image
 ```
 
-`DINOEncoder` in `src/encoders/dino_encoder.py` wraps both modes. When `use_patches=False` it calls `model(images)` and returns the CLS token; when `True` it calls `model.forward_features(images)["x_norm_patchtokens"]`.
+`DINOEncoder` in `src/encoders/dino_encoder.py` wraps both modes (and both model variants via `model_name`). When `use_patches=False` it calls `model(images)` and returns the CLS token; when `True` it calls `model.forward_features(images)["x_norm_patchtokens"]`.
 
 On Apple MPS the constructor forces `device = cpu`. `forward_features` produces NaN activations on MPS in float16, a known issue with the attention kernel on that backend. Extraction is slower on CPU but runs once offline.
 

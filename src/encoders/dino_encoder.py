@@ -32,23 +32,29 @@ class DINOEncoder:
     All inference is performed with ``torch.no_grad()`` in float32.
     """
 
-    def __init__(self, use_patches: bool = False) -> None:
+    def __init__(self, use_patches: bool = False, model_name: str | None = None) -> None:
         """Initialise and load the DINOv2 ViT-L/14 model.
 
         Args:
-            use_patches: If True, return concatenated patch tokens instead
-                of the CLS token.  CLS token has shape ``(B, 1024)``;
-                patch tokens have shape ``(B, N_patches, 1024)``.
+            use_patches: If True, return patch tokens instead of the CLS token.
+                CLS token has shape ``(B, 1024)``; patch tokens ``(B, N_patches, 1024)``.
+            model_name: torch.hub entrypoint. Defaults to the registers variant
+                ``dinov2_vitl14_reg`` for patches (it removes the high-norm artifact
+                patches that would otherwise become spurious SAE features), and the
+                plain ``dinov2_vitl14`` for the CLS retrieval path.
         """
         device = get_device()
         if device.type == "mps":
             device = torch.device("cpu")
         self.device = device
         self.use_patches = use_patches
+        self.model_name = model_name or (
+            "dinov2_vitl14_reg" if use_patches else "dinov2_vitl14"
+        )
 
         model = cast(
             _DINOModel,
-            torch.hub.load("facebookresearch/dinov2", "dinov2_vitl14"),
+            torch.hub.load("facebookresearch/dinov2", self.model_name),
         )
         model.eval()
         model.to(self.device)

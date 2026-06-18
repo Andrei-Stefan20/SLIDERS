@@ -125,17 +125,39 @@ Run after changing SAE training settings, feature ranking, VLM naming, retrieval
 steering, dataset adapters, or index build behavior. Prefer a held-out query split
 for any number you intend to report.
 
-## Future work: region-level features (crop-CLS SAE)
+## Region-level features (patch-token SAE)
 
-The SAE is trained on **whole-image CLS embeddings**, so features tend to capture global
-concepts (leaf edge, veins, shadow). On the PlantVillage run these sliders are
-**directionally distinct** (decoder-cosine heatmap is near-zero off-diagonal) yet several
-get the **same VLM name** — the redundancy is at the naming level, not the direction
-level: more distinct directions exist than there are coarse nameable concepts on a narrow
-dataset. For more local, disease-specific, and diverse features, train
-a **separate analysis SAE on crop-CLS embeddings**: tile each image into crops, re-embed
-each crop with DINOv2's CLS, and train an SAE on those vectors. It stays in CLS geometry,
-so it does not disturb the retrieval/steering path (which must remain image-level — patch
-directions are not addable to the CLS query); it is an interpretability artifact. This is
-the structural fix for the "global concept" limitation, distinct from just shrinking
-`hidden_dim`.
+A CLS-trained SAE captures global concepts (leaf edge, veins, shadow): on PlantVillage the
+sliders are **directionally distinct** (decoder-cosine heatmap near-zero off-diagonal) yet
+several get the **same VLM name** — more distinct directions exist than coarse nameable
+concepts on a narrow dataset. The structural fix is to train on **DINOv2 patch tokens**
+instead of the CLS token, so features become local and region-specific.
+
+Implemented:
+- `extract_embeddings --use-patches` writes the patch tokens (from the `dinov2_vitl14_reg`
+  registers variant, which avoids the high-norm artifact patches) as a memory-mapped
+  `(N_images*256, 1024)` array plus the `_patch_image_ids` / `_patch_meta` sidecars.
+- `train_sae --mmap` trains the SAE directly on that memmap (auto-enabled above 2 GB).
+- `name_features` detects patch embeddings, aggregates per image by max over patches, and
+  shows the VLM a montage of each image's top-N patches (`--n-patches`), each as a context
+  crop with the active patch outlined (activation location is correlational, not causal —
+  arXiv:2509.00749 — so context is kept rather than cropped away).
+
+Patch retrieval and evaluation (late-interaction MaxSim):
+- `build_index` on a patch embeddings file builds a **patch index** (IVF-PQ above ~200k
+  patches, ~1-2 GB; exact flat below) for candidate generation.
+- `src/retrieval/patch_retrieval.py` scores a query image against the corpus by **MaxSim**
+  (sum over query patches of the best-matching corpus patch), computed exactly from the
+  patch memmap for the candidate images. Steering adds the SAE feature direction to the
+  query patches first (`steer_patches`) — the patch-space analog of slider steering.
+- `evaluate` detects a patch corpus and runs the patch path (`src/evaluation/patch_eval.py`):
+  **recall@k / precision@k / mAP** (parent-folder ground truth), **monosemanticity** (class
+  purity of each feature's top *patches*, labelled by their parent image), **steering
+  faithfulness** (steering a feature raises its activation in the MaxSim results, >1),
+  **selectivity** (on-target fraction), and **isotonicity** (Spearman ρ over alphas).
+- The patch retrieval is also wired into the live app: launch the API with the patch stem
+  (`--dataset <name>_train_patch`) and `RetrievalService` uses MaxSim; sliders steer the
+  query patches.
+
+Still CLS-only: the **SAE-vs-PCA ablation** and the **CLIP / cross-model naming** checks
+(the latter are CLIP-circular by construction). Everything else has a patch equivalent.

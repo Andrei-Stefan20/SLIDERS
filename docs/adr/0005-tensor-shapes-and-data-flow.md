@@ -37,6 +37,24 @@ saved to disk:
 
 The embeddings at this point are **not** L2-normalized. Normalization happens in the next phase.
 
+### Patch variant (`--use-patches`)
+
+The encoder loads `dinov2_vitl14_reg` (registers variant) and returns patch tokens:
+
+```
+(B, 3, 224, 224)
+  → model.forward_features(images)["x_norm_patchtokens"]   (B, 256, 1024)
+  → flatten to rows, written into a preallocated memmap one batch at a time
+
+saved to disk:
+  {dataset}_patch_embeddings.npy          (N_images*256, 1024)  float32, memmap
+  {dataset}_patch_image_ids.npy           (N_images*256,)       int32, patch→image
+  {dataset}_patch_meta.json               {grid_size, patches_per_image, n_images}
+  {dataset}_patch_image_paths.json        list of N_images path strings
+```
+
+Patches of one image are contiguous rows. The SAE then trains on this 2-D memmap exactly as below (`EmbeddingDataset(mmap=True)`); the module is unchanged since rows are still 1024-d.
+
 ---
 
 ## Phase 2: SAE training
@@ -255,42 +273,33 @@ Return `idxs[:k]` and `dists[:k]`.
 
 **`src/naming/spatial_localization.py`**
 
-This path uses patch tokens instead of the CLS token.
+This path uses patch tokens instead of the CLS token. The geometry transform
+(`Resize(256) → CenterCrop(224)`) matches corpus extraction, so crop coordinates align
+with the pixels DINOv2 saw.
 
 ```
 raw image  (H, W, 3)   PIL, any resolution
+  Resize(256) → CenterCrop(224)         (224, 224, 3)   same as corpus extraction
 
-  Resize(224)         both sides → 224 px (aspect ratio not preserved)
-  CenterCrop(224)     no-op, both sides already 224
-                      (224, 224, 3)   different from corpus extraction,
-                      which uses Resize(256) → CenterCrop(224))
-
-DINOEncoder (use_patches=True):
+DINOEncoder (use_patches=True, dinov2_vitl14_reg):
   (1, 3, 224, 224)
-  model.forward_features(images)["x_norm_patchtokens"]
-                                        (1, 256, 1024)   one vector per patch
+  model.forward_features(images)["x_norm_patchtokens"]   (1, 256, 1024)
   squeeze  →                            (256, 1024)
 
 SAE encoder applied patch by patch:
   sae.encode(patch_tokens)              (256, 8192)   sparse activations per patch
+  patch_acts[:, feature_id]  →          (256,)        one value per patch
 
-extract column for target feature:
-  patch_acts[:, feature_id]  →          (256,)   one activation value per patch
-
-argmax  →  best_patch_idx               scalar in [0, 255]
-
-map to grid position:
-  row = best_patch_idx // 16            in [0, 15]
-  col = best_patch_idx  % 16            in [0, 15]
-  patch_px = 224 // 16 = 14
-  center_x = col * 14 + 7
-  center_y = row * 14 + 7
-
-crop 96 px window centered on (center_x, center_y) in 224×224 image
-  → PIL Image crop                      96×96 pixels  (clipped at image boundaries)
+top-N patches (default 4)  →  for each: 14px patch cell + 96px context box (grid=16)
+  crop the 96px context window, outline the patch cell (red), montage the N crops
+  → one PIL montage per image
 ```
 
-This crop is passed to the VLM as a HIGH or LOW activation example.
+For ranking and top-image selection (patch-trained SAE), `name_features` first reduces the
+patch memmap to a per-image `(N_images, 8192)` matrix by taking the **max over each image's
+patches**. The montage (HIGH and LOW examples) is then passed to the VLM. Showing the patch
+in context, not a tight crop, is deliberate: activation location is correlational, not
+causal (arXiv:2509.00749).
 
 ---
 

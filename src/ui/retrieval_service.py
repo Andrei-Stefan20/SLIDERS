@@ -97,6 +97,34 @@ class RetrievalService:
         _, indices = search(state.index, query_emb, k=min(k, len(state.image_paths)))
         return self._majority_class_from_indices(indices)
 
+    def _retrieve_patch(self, query_patches: np.ndarray, slider_values: list[float], k: int) -> RetrievalResult:
+        from src.retrieval.patch_retrieval import maxsim_search, steer_patches
+
+        state = self._state
+        qp = np.asarray(query_patches, dtype=np.float32)
+        slider_config = {
+            fid: float(a) for fid, a in zip(state.feature_ids, slider_values) if abs(a) > 1e-6
+        }
+        if slider_config:
+            fids = list(slider_config)
+            dirs = state.sae.feature_directions(fids).cpu().numpy()
+            qp = steer_patches(qp, dirs, [slider_config[f] for f in fids])
+
+        _, indices = maxsim_search(state.patch_corpus, state.index, qp, k=k)
+        majority_class = self._majority_class_from_indices(indices)
+        dists = np.ones(len(indices), dtype=np.float32)
+        _, indices, was_filtered = self._filter_to_class(dists, indices, majority_class, k)
+
+        items: list[SearchResult] = []
+        for idx in indices:
+            if 0 <= int(idx) < len(state.image_paths):
+                try:
+                    path = state.image_paths[int(idx)]
+                    items.append(SearchResult(image=Image.open(path).convert("RGB"), path=path))
+                except Exception as e:
+                    logger.warning(f"Could not load image {state.image_paths[int(idx)]}: {e}")
+        return RetrievalResult(items=items, majority_class=majority_class, was_filtered=was_filtered)
+
     def retrieve(
         self,
         query_emb: np.ndarray,
@@ -105,6 +133,9 @@ class RetrievalService:
         k: int = 20,
     ) -> RetrievalResult:
         state = self._state
+
+        if state.patch_corpus is not None:
+            return self._retrieve_patch(query_emb, slider_values, k)
 
         if state.class_directions is not None:
             distances, indices = search_with_direction_sliders(

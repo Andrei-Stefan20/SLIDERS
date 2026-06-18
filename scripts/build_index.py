@@ -10,11 +10,36 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.retrieval.index import build_index, build_sae_index, save_index
-from src.utils.io import dataset_stem, normalize_embeddings
+from src.retrieval.index import build_index, build_patch_index, build_sae_index, save_index
+from src.utils.io import dataset_stem, normalize_embeddings, patch_sidecar_paths
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _build_patch_index_streaming(reader, use_pq: bool, chunk: int = 100_000):
+    """Patch index without loading all rows into RAM: train IVF-PQ on a sample, add in
+    chunks. Reads go through PatchReader so int8 storage is dequantized. For small corpora
+    (or --no-pq) fall back to the exact flat index."""
+    import faiss
+
+    from src.retrieval.patch_retrieval import l2_normalize
+
+    n, d = len(reader), reader.dim
+    if not use_pq:
+        return build_patch_index(reader.rows(slice(0, n)), use_pq=False)
+
+    rng = np.random.default_rng(0)
+    sample_idx = np.sort(rng.choice(n, size=min(n, 300_000), replace=False))
+    sample = l2_normalize(reader.rows(sample_idx))
+    nlist = min(4096, max(1, n // 39))
+    quantizer = faiss.IndexFlatIP(d)
+    index = faiss.IndexIVFPQ(quantizer, d, nlist, 32, 8, faiss.METRIC_INNER_PRODUCT)
+    index.train(sample)
+    for s in range(0, n, chunk):
+        index.add(l2_normalize(reader.rows(slice(s, s + chunk))))
+    index.nprobe = 16
+    return index
 
 
 def main() -> None:
@@ -30,10 +55,30 @@ def main() -> None:
         help="If provided, also builds a SAE-space index and saves <dataset>_activations.npy.",
     )
     parser.add_argument("--sae-index", type=Path, default=None)
+    parser.add_argument(
+        "--no-pq", action="store_true",
+        help="Patch index: force an exact flat index instead of IVF-PQ (small corpora only).",
+    )
     args = parser.parse_args()
 
     stem = dataset_stem(args.embeddings)
     proc = args.embeddings.parent
+
+    # Patch embeddings: build a late-interaction patch index (one vector per patch),
+    # not the per-image CLS index. SAE-space index/activations don't apply (too large).
+    if patch_sidecar_paths(args.embeddings)[1].exists():
+        from src.retrieval.patch_store import PatchReader
+
+        reader = PatchReader(args.embeddings)
+        out = args.output or proc / f"{stem}_index.faiss"
+        use_pq = (not args.no_pq) and len(reader) > 200_000
+        logger.info(f"Patch index over ({len(reader)}, {reader.dim}) "
+                    f"{reader.data.dtype} ({'IVF-PQ' if use_pq else 'flat'})")
+        index = _build_patch_index_streaming(reader, use_pq=use_pq)
+        save_index(index, out)
+        logger.info(f"Patch index → {out}  ({index.ntotal} vectors, dim={index.d})")
+        return
+
     args.output = args.output or proc / f"{stem}_index.faiss"
 
     embeddings = np.load(args.embeddings).astype(np.float32)

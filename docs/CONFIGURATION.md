@@ -39,7 +39,7 @@ naming:
 
 ## encoder
 
-`use_patches: false` means the extractor saves one CLS embedding per image. The naming script overrides this internally to extract patch tokens for spatial localization, you do not need to change this field.
+`use_patches: false` means the extractor saves one CLS embedding per image (the retrieval path). Set `use_patches: true` (or pass `--use-patches`) to extract DINOv2 **patch tokens** instead — 256 per image — written as a memory-mapped `<dataset>_patch_embeddings.npy` with `_patch_image_ids.npy` / `_patch_meta.json` sidecars. The SAE then trains on those patches (`train_sae --mmap`, auto-enabled above 2 GB) to learn local, region-level features. In patch mode the encoder loads the registers variant `dinov2_vitl14_reg`, which avoids the high-norm artifact patches that would otherwise become spurious features. The naming script always extracts patch tokens internally for spatial localization regardless of this field.
 
 ## sae
 
@@ -63,6 +63,8 @@ Training uses Adam with cosine LR annealing. The best checkpoint is selected by 
 ## naming
 
 `n_features` is the number of features to name. `n_crops` controls how many high- and low-activation images are cropped per feature. `crop_size` is the pixel size of each crop sent to the VLM.
+
+For a patch-trained SAE the naming runs in patch mode automatically (detected from the embeddings sidecars): images are ranked by each feature's max activation over their patches, and each example is a montage of the image's top patches, shown as a context crop with the active patch outlined. `--n-patches` (CLI only, default 4) sets how many top patches per image go into the montage.
 
 `ranking` selects how candidate feature ids are chosen:
 

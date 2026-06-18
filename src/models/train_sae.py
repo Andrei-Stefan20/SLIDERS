@@ -48,6 +48,7 @@ def train_sae(
     patience: int = 10,
     dead_threshold_steps: int = 1000,
     prefix: str = "",
+    mmap: bool = False,
 ) -> None:
     logger = get_logger(__name__)
     device = get_device()
@@ -56,7 +57,7 @@ def train_sae(
         f"activation={'topk-' + str(topk) if topk > 0 else 'relu+L1'}"
     )
 
-    dataset = EmbeddingDataset(embeddings_path)
+    dataset = EmbeddingDataset(embeddings_path, mmap=mmap)
     n_val = max(1, int(len(dataset) * val_split))
     rng = torch.Generator().manual_seed(42)
     indices = torch.randperm(len(dataset), generator=rng).tolist()

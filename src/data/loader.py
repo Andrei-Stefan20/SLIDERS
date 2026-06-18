@@ -8,7 +8,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from src.encoders.dino_encoder import DINO_TRANSFORM as IMAGENET_TRANSFORM
-from src.utils.io import normalize_embeddings
+from src.utils.io import normalize_embeddings, patch_scales_path
 
 
 class ImageFolderFlat(Dataset):
@@ -40,13 +40,23 @@ class EmbeddingDataset(Dataset):
         self, npy_path: Path | str, mmap: bool = False, normalize: bool = True
     ) -> None:
         path = Path(npy_path)
+        scales_path = patch_scales_path(path)
         if mmap:
-            # Stay memory-mapped; normalize per-row in __getitem__ instead.
+            # Stay memory-mapped; normalize (and dequantize int8) per-row in __getitem__.
             self._data: np.ndarray = np.load(path, mmap_mode="r")
+            self._scales = (
+                np.load(scales_path, mmap_mode="r")
+                if self._data.dtype == np.int8 and scales_path.exists() else None
+            )
             self._normalize_rows = normalize
         else:
-            data = np.load(path).astype(np.float32)
+            data = np.load(path)
+            if data.dtype == np.int8 and scales_path.exists():
+                data = data.astype(np.float32) * np.load(scales_path).astype(np.float32)[:, None]
+            else:
+                data = data.astype(np.float32)
             self._data = normalize_embeddings(data) if normalize else data
+            self._scales = None
             self._normalize_rows = False
         if self._data.ndim != 2:
             raise ValueError(
@@ -58,6 +68,8 @@ class EmbeddingDataset(Dataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         row = self._data[idx].astype(np.float32)
+        if self._scales is not None:  # int8 storage: dequantize
+            row = row * float(self._scales[idx])
         if self._normalize_rows:
             norm = float(np.linalg.norm(row))
             if norm > 0:

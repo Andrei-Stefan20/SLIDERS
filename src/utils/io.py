@@ -36,6 +36,33 @@ def load_image_paths(path: Path | str) -> list[str]:
     return json.loads(Path(path).read_text())
 
 
+def patch_sidecar_paths(embeddings_path: Path | str) -> tuple[Path, Path]:
+    """Sidecar (image_ids.npy, meta.json) paths for a patch embeddings file."""
+    stem = dataset_stem(embeddings_path)
+    parent = Path(embeddings_path).parent
+    return parent / f"{stem}_image_ids.npy", parent / f"{stem}_meta.json"
+
+
+def patch_scales_path(embeddings_path: Path | str) -> Path:
+    """Per-row int8 dequantization scales for a patch embeddings file (`_scales.npy`)."""
+    stem = dataset_stem(embeddings_path)
+    return Path(embeddings_path).parent / f"{stem}_scales.npy"
+
+
+def save_patch_sidecars(
+    embeddings_path: Path | str, image_ids: np.ndarray, meta: dict
+) -> None:
+    ids_path, meta_path = patch_sidecar_paths(embeddings_path)
+    np.save(ids_path, image_ids.astype(np.int32))
+    meta_path.write_text(json.dumps(meta, indent=2))
+
+
+def load_patch_sidecars(embeddings_path: Path | str) -> tuple[np.ndarray, dict]:
+    """(patch->image-id array, meta dict) for a patch embeddings file."""
+    ids_path, meta_path = patch_sidecar_paths(embeddings_path)
+    return np.load(ids_path), json.loads(meta_path.read_text())
+
+
 def save_feature_names(
     info: dict[str | int, dict[str, str]], path: Path | str
 ) -> None:

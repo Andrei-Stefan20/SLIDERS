@@ -14,7 +14,37 @@ if str(ROOT) not in sys.path:
 from src.config import AppConfig
 from src.models.sae import SparseAutoencoder
 from src.naming.feature_namer import get_top_images, rank_features_by_variance
-from src.utils.io import dataset_stem, normalize_embeddings
+from src.retrieval.patch_store import PatchReader
+from src.utils.io import dataset_stem, normalize_embeddings, patch_sidecar_paths
+
+
+def _aggregate_patch_activations(
+    patch_emb_path: Path, sae: SparseAutoencoder, batch_rows: int = 8192
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce a patch memmap to per-image signals by streaming through the SAE.
+
+    Returns (max_acts (N_img, hidden), mean_emb (N_img, dim)): per-image activation is the
+    max over its patches; mean_emb is the mean unit-norm patch embedding (MMR fingerprint).
+    """
+    reader = PatchReader(patch_emb_path)
+    ids, n_img, dim = reader.image_ids, reader.n_images, reader.dim
+    max_acts = np.zeros((n_img, sae.hidden_dim), dtype=np.float32)
+    sum_emb = np.zeros((n_img, dim), dtype=np.float32)
+    counts = np.zeros(n_img, dtype=np.int64)
+
+    with torch.no_grad():
+        for start in range(0, len(reader), batch_rows):
+            rows = reader.rows(slice(start, start + batch_rows))  # float32, dequantized
+            norms = np.linalg.norm(rows, axis=1, keepdims=True)
+            rows_n = rows / np.where(norms > 1e-8, norms, 1.0)
+            acts = sae.encode(torch.from_numpy(rows_n)).numpy()
+            bids = ids[start : start + batch_rows]
+            np.maximum.at(max_acts, bids, acts)
+            np.add.at(sum_emb, bids, rows_n)
+            np.add.at(counts, bids, 1)
+
+    mean_emb = sum_emb / np.maximum(counts[:, None], 1)
+    return max_acts, mean_emb
 
 
 def main() -> None:
@@ -41,6 +71,10 @@ def main() -> None:
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--n-crops", type=int, default=None)
     parser.add_argument(
+        "--n-patches", type=int, default=None,
+        help="Patch mode: how many top patches per image to montage for the VLM (default 4).",
+    )
+    parser.add_argument(
         "--cache-dir", type=Path, default=Path("data/cache/vlm_names"),
         help="Base dir for the VLM cache. Names are stored under <cache-dir>/<dataset>/ "
              "(one subfolder per source dataset) so different datasets don't mix.",
@@ -63,31 +97,40 @@ def main() -> None:
     )
     crop_size = args.crop_size or (naming_cfg.crop_size if naming_cfg else 96)
     n_crops = args.n_crops or (naming_cfg.n_crops if naming_cfg else 8)
+    n_patches = args.n_patches or (naming_cfg.n_patches if naming_cfg and hasattr(naming_cfg, "n_patches") else 4)
 
-    embeddings = normalize_embeddings(np.load(args.embeddings).astype(np.float32))
     image_paths = json.loads(args.image_paths.read_text())
-
     sae = SparseAutoencoder.load(args.sae_model)
 
-    batch_size = 1024
-    all_acts = []
-    with torch.no_grad():
-        for start in range(0, len(embeddings), batch_size):
-            batch = torch.from_numpy(embeddings[start : start + batch_size])
-            all_acts.append(sae.encode(batch).numpy())
-    activations = np.concatenate(all_acts, axis=0)
+    # Patch SAE: reduce the (N_patch, D) memmap to per-image signals; else legacy CLS path.
+    patch_mode = patch_sidecar_paths(args.embeddings)[1].exists()
+    if patch_mode:
+        print("Patch-level embeddings detected: aggregating patches per image (max activation).")
+        activations, embeddings = _aggregate_patch_activations(args.embeddings, sae)
+    else:
+        embeddings = normalize_embeddings(np.load(args.embeddings).astype(np.float32))
+        all_acts = []
+        with torch.no_grad():
+            for start in range(0, len(embeddings), 1024):
+                batch = torch.from_numpy(embeddings[start : start + 1024])
+                all_acts.append(sae.encode(batch).numpy())
+        activations = np.concatenate(all_acts, axis=0)
 
+    # Diversify sliders by semantic fingerprint (mean embedding of each feature's top
+    # images): features that fire on visually similar images would get the same VLM name,
+    # which activation-correlation diversity misses.
     if ranking == "diverse_mmr":
         from src.naming.feature_ranking import rank_diverse_mmr
         ranked_features = rank_diverse_mmr(
-            activations, n_features=n_features, lambda_mmr=lambda_mmr
+            activations, n_features=n_features, lambda_mmr=lambda_mmr, embeddings=embeddings
         )
     elif ranking == "selectivity":
         from pathlib import PurePath
         from src.naming.feature_ranking import rank_by_selectivity_mmr
         class_labels = np.array([PurePath(p).parent.name for p in image_paths])
         ranked_features = rank_by_selectivity_mmr(
-            activations, class_labels, n_features=n_features, lambda_mmr=lambda_mmr
+            activations, class_labels, n_features=n_features, lambda_mmr=lambda_mmr,
+            embeddings=embeddings,
         )
     elif ranking == "sparsity":
         from src.naming.feature_ranking import compute_sparsity
@@ -102,7 +145,10 @@ def main() -> None:
     print(f"Naming {len(ranked_features)} features (ranking={ranking})...")
 
     from src.encoders.dino_encoder import DINOEncoder
-    from src.naming.spatial_localization import localize_feature_batch
+    from src.naming.spatial_localization import (
+        localize_feature_batch,
+        localize_feature_topk_batch,
+    )
     from src.naming.vlm_namer import VLMFeatureNamer
 
     cache_dir = args.cache_dir / stem
@@ -110,12 +156,24 @@ def main() -> None:
     dino = DINOEncoder(use_patches=True)
     vlm = VLMFeatureNamer(model=vlm_model, cache_dir=cache_dir)
 
+    def crops_for(paths, fid):
+        # Patch SAE: montage of top patches per image; CLS SAE: single best patch.
+        if patch_mode:
+            return localize_feature_topk_batch(paths, dino, sae, fid, n_patches, crop_size)
+        return localize_feature_batch(paths, dino, sae, fid, crop_size)
+
     feature_info: dict[str, dict] = {}
+    used_names: set[str] = set()
     for fid in ranked_features:
         fi = get_top_images(activations, image_paths, fid, k=n_crops)
-        top_crops = localize_feature_batch(fi.top_paths, dino, sae, fid, crop_size)
-        bot_crops = localize_feature_batch(fi.bottom_paths, dino, sae, fid, crop_size)
+        top_crops = crops_for(fi.top_paths, fid)
+        bot_crops = crops_for(fi.bottom_paths, fid)
         name, desc = vlm.name_feature(top_crops, bot_crops)
+        # If a distinct feature got an already-used name, re-name it contrastively so the
+        # sliders read as different concepts ("undifferentiated" is allowed to repeat).
+        if name != "undifferentiated" and name in used_names:
+            name, desc = vlm.name_feature(top_crops, bot_crops, avoid_names=sorted(used_names))
+        used_names.add(name)
         feature_info[str(fid)] = {"name": name, "description": desc}
         print(f"  feature {fid:5d} -> {name!r}")
         print(f"             {desc}")

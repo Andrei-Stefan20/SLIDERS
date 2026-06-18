@@ -8,8 +8,9 @@ from src.encoders.dino_encoder import DINOEncoder
 from src.models.sae import SparseAutoencoder
 from src.naming.feature_namer import rank_features_by_variance
 from src.retrieval.index import load_index
+from src.retrieval.patch_retrieval import PatchCorpus
 from src.ui.state import AppState
-from src.utils.io import dataset_stem
+from src.utils.io import dataset_stem, patch_sidecar_paths
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -81,6 +82,41 @@ def _discover_processed(processed_dir, suffix):
     return None
 
 
+def _feature_sliders_from_names(names_path: Path, n_sliders: int):
+    """(feature_ids, names, descriptions) from a feature_names.json, or empty lists."""
+    if not names_path.exists():
+        return [], [], []
+    all_names = json.loads(names_path.read_text())
+    feature_ids = [int(k) for k in list(all_names.keys())[:n_sliders]]
+    vals = [all_names[str(fid)] for fid in feature_ids]
+    names = [v["name"] if isinstance(v, dict) else v for v in vals]
+    descs = [v.get("description", "") if isinstance(v, dict) else "" for v in vals]
+    return feature_ids, names, descs
+
+
+def _load_patch_resources(embeddings_path, index_path, sae_path, image_paths_json,
+                          stem, adapter, n_sliders) -> AppState:
+    """Patch corpus: MaxSim retrieval over a patch index, queries are patch-token sets.
+    No CLS embeddings/activations/previews (those are image-level only)."""
+    dino = DINOEncoder(use_patches=True)
+    sae = SparseAutoencoder.load(sae_path)
+    index = load_index(index_path)
+    patch_corpus = PatchCorpus(embeddings_path)
+    image_paths = json.loads(image_paths_json.read_text())
+    image_classes = _build_image_class_metadata(image_paths, adapter)
+    feature_ids, feature_names, feature_descriptions = _feature_sliders_from_names(
+        sae_path.parent / f"{stem}_feature_names.json", n_sliders
+    )
+    logger.info(f"Patch corpus: {patch_corpus.n_images} images, "
+                f"{len(patch_corpus.data)} patches, {len(feature_ids)} sliders")
+    return AppState(
+        dino=dino, sae=sae, index=index, sae_index=None, embeddings=None, activations=None,
+        image_paths=image_paths, feature_ids=feature_ids, feature_names=feature_names,
+        feature_descriptions=feature_descriptions, image_classes=image_classes,
+        path_to_idx={p: i for i, p in enumerate(image_paths)}, patch_corpus=patch_corpus,
+    )
+
+
 def load_resources(
     index_path,
     sae_path,
@@ -108,6 +144,12 @@ def load_resources(
 
     adapter_name = adapter_name or dataset or "generic"
     adapter = get_adapter(adapter_name)
+
+    if patch_sidecar_paths(embeddings_path)[1].exists():
+        logger.info("Patch corpus detected: loading MaxSim retrieval resources.")
+        return _load_patch_resources(
+            embeddings_path, index_path, sae_path, image_paths_json, stem, adapter, n_sliders
+        )
 
     dino = DINOEncoder(use_patches=False)
 

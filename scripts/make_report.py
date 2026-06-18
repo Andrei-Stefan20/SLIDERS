@@ -32,6 +32,14 @@ def _label(path: str) -> str:
     return Path(path).parent.name
 
 
+def _feature_name(names: dict | None, fid: int) -> str:
+    """Name string for a feature; feature_names.json stores {name, description} dicts."""
+    v = (names or {}).get(str(fid))
+    if isinstance(v, dict):
+        return v.get("name", "")
+    return v or ""
+
+
 def _write_csv(path: Path, header: list[str], rows: list[list]) -> None:
     with path.open("w", newline="") as f:
         w = csv.writer(f)
@@ -168,10 +176,15 @@ def _montage(paths: list[str], acts: list[float], thumb: int = 110) -> Image.Ima
 
 
 def stage_features(out: Path, acts: np.ndarray, paths: list[str], names: dict | None,
-                   n_features: int, montage_k: int) -> None:
+                   n_features: int, montage_k: int, sae=None) -> None:
     print("\n[2] Feature naming / top images")
     var = _activation_stats(acts)["var"]
-    top_feats = [int(i) for i in np.argsort(var)[::-1] if var[i] > 0][:n_features]
+    # The sliders are the named features (diverse_mmr); fall back to top-variance if
+    # naming hasn't run. The redundancy heatmap is only meaningful on the actual sliders.
+    if names:
+        top_feats = [int(k) for k in names.keys()][:n_features]
+    else:
+        top_feats = [int(i) for i in np.argsort(var)[::-1] if var[i] > 0][:n_features]
     cols = np.asarray(acts[:, top_feats], dtype=np.float32)  # N x n_features
 
     table = []
@@ -180,7 +193,7 @@ def stage_features(out: Path, acts: np.ndarray, paths: list[str], names: dict | 
         order = np.argsort(col)[::-1][:montage_k]
         tpaths = [paths[i] for i in order]
         tacts = [float(col[i]) for i in order]
-        name = (names or {}).get(str(fid), "")
+        name = _feature_name(names, fid)
         _montage(tpaths, tacts).save(out / f"feature_{fid:05d}_top.png")
         table.append([fid, name, _label(tpaths[0]), f"{tacts[0]:.3f}", f"{float(var[fid]):.4f}"])
     print(f"  wrote {len(top_feats)} montages")
@@ -188,6 +201,25 @@ def stage_features(out: Path, acts: np.ndarray, paths: list[str], names: dict | 
                ["feature_id", "name", "top1_class", "top1_activation", "variance"], table)
     if names is None:
         print("  (no feature_names.json -> montages unlabeled; run name_features.py)")
+
+    # Redundancy: cosine between the shown features' decoder directions. High off-diagonal
+    # blocks = duplicate sliders (e.g. several "leaf edge" features pointing the same way).
+    if sae is not None:
+        dirs = sae.feature_directions(top_feats).cpu().numpy()
+        sim = dirs @ dirs.T
+        labels = [f"{fid}:{_feature_name(names, fid)[:18]}" for fid in top_feats]
+        fig, ax = plt.subplots(figsize=(max(6, len(top_feats) * 0.4), max(5, len(top_feats) * 0.38)))
+        im = ax.imshow(sim, cmap="RdBu_r", vmin=-1, vmax=1)
+        ax.set_xticks(range(len(top_feats))); ax.set_xticklabels(labels, rotation=90, fontsize=7)
+        ax.set_yticks(range(len(top_feats))); ax.set_yticklabels(labels, fontsize=7)
+        ax.set_title("Feature decoder-direction cosine (redundancy)")
+        fig.colorbar(im, ax=ax, fraction=0.046)
+        _save(fig, out / "feature_direction_similarity.png")
+        offdiag = sim[~np.eye(len(top_feats), dtype=bool)]
+        _write_csv(out / "feature_direction_similarity.csv",
+                   ["", *labels], [[labels[i], *[f"{v:.3f}" for v in sim[i]]] for i in range(len(top_feats))])
+        print(f"  redundancy: max off-diagonal cosine={offdiag.max():.3f}, "
+              f"frac>0.7={float((offdiag > 0.7).mean()):.0%}")
 
 
 # --------------------------------------------------------------------------- [3]
@@ -252,9 +284,10 @@ def stage_evaluation(out: Path, eval_json: Path) -> None:
         _save(fig, out / "monosemanticity.png")
 
     if "faithfulness" in r:
-        vals = list(r["faithfulness"]["per_feature"].values())
-        _save(_dist_fig(vals, "Steering faithfulness", "steered/unsteered activation ratio",
-                        1.0, "no effect (1.0)"), out / "faithfulness.png")
+        vals = [v for v in r["faithfulness"]["per_feature"].values() if v is not None]
+        if vals:
+            _save(_dist_fig(vals, "Steering faithfulness", "steered/unsteered activation ratio",
+                            1.0, "no effect (1.0)"), out / "faithfulness.png")
 
     if "isotonicity" in r:
         vals = [f["spearman_rho"] for f in r["isotonicity"]["per_feature"]]
@@ -266,21 +299,46 @@ def stage_evaluation(out: Path, eval_json: Path) -> None:
         _save(_dist_fig(vals, "Targeted class delta-recall", "steered - unsteered recall",
                         0.0, "no effect (0)"), out / "targeted_recall.png")
 
+    if "steering_selectivity" in r:
+        vals = [v for v in r["steering_selectivity"]["per_feature"].values() if v is not None]
+        if vals:
+            _save(_dist_fig(vals, "Steering selectivity", "on-target fraction (lift on own feature)",
+                            0.5, "0.5"), out / "steering_selectivity.png")
+
+    if "retrieval_comparison" in r:
+        comp = r["retrieval_comparison"]
+        methods = list(comp.keys())
+        p5 = [comp[m].get("P@5", 0.0) for m in methods]
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.bar([mm.split(" (")[0] for mm in methods], p5,
+               color=["#4c72b0", "#c44e52", "#55a868"][:len(methods)])
+        ax.set_ylabel("P@5"); ax.set_title("Retrieval precision: unsteered vs PCA vs SAE steering")
+        for i, v in enumerate(p5):
+            ax.text(i, v, f"{v:.3f}", ha="center", va="bottom", fontsize=9)
+        _save(fig, out / "retrieval_comparison.png")
+
     if "ablation" in r:
         ab = r["ablation"]
+        # honest framing: pair the (misleading) cosine lift with the steered P@5.
+        comp = r.get("retrieval_comparison", {})
+        sae_p5 = next((v.get("P@5") for k, v in comp.items() if k.startswith("SAE")), None)
+        pca_p5 = next((v.get("P@5") for k, v in comp.items() if k.startswith("PCA")), None)
         fig, ax = plt.subplots(figsize=(6, 4))
         bars = ["SAE", "PCA"]
         ax.bar(bars, [ab["sae_median_faithfulness"], ab["pca_median_faithfulness"]],
                color=["#55a868", "#c44e52"])
         ax.axhline(0, color="black", linewidth=0.8)
-        ax.set_title(f"Median steering lift (SAE advantage={ab['steering_advantage']:+.4f})")
+        sub = ""
+        if sae_p5 is not None and pca_p5 is not None:
+            sub = f"\nbut steered P@5: SAE={sae_p5:.3f} vs PCA={pca_p5:.3f}"
+        ax.set_title(f"Median cosine lift (PCA higher = moves more, not better){sub}")
         ax.set_ylabel("cosine lift (steered - unsteered)")
         _save(fig, out / "sae_vs_pca.png")
 
     # flat summary table of every distribution metric
     rows = []
-    for key in ("faithfulness", "isotonicity", "targeted_recall", "monosemanticity",
-                "clip_alignment", "direction_steering"):
+    for key in ("faithfulness", "steering_selectivity", "isotonicity", "targeted_recall",
+                "monosemanticity", "clip_alignment", "direction_steering"):
         s = r.get(key, {}).get("summary")
         if s:
             rows.append([key, f"{s['mean']:.4f}", f"{s['median']:.4f}",
@@ -290,17 +348,215 @@ def stage_evaluation(out: Path, eval_json: Path) -> None:
                    ["metric", "mean", "median", "ci_low", "ci_high", "n"], rows)
 
 
+# ----------------------------------------------------------------- patch stages
+def _heatmap_overlay(img_aligned: Image.Image, grid: np.ndarray, alpha: float = 0.55) -> Image.Image:
+    """Blend a (G, G) activation map over the aligned 224x224 image as a jet heatmap."""
+    import matplotlib.cm as cm
+
+    g = grid.astype(np.float32)
+    g = (g - g.min()) / (g.max() - g.min() + 1e-8)
+    big = np.asarray(Image.fromarray((g * 255).astype(np.uint8)).resize((224, 224), Image.BILINEAR))
+    heat = (cm.jet(big / 255.0)[..., :3] * 255).astype(np.float32)
+    base = np.asarray(img_aligned.convert("RGB").resize((224, 224))).astype(np.float32)
+    return Image.fromarray(((1 - alpha) * base + alpha * heat).astype(np.uint8))
+
+
+def _row_montage(images: list[Image.Image], thumb: int = 130) -> Image.Image:
+    """Horizontal strip of equal-size thumbnails (query/results rows)."""
+    grid = Image.new("RGB", (len(images) * thumb, thumb), "white")
+    for i, im in enumerate(images):
+        grid.paste(im.convert("RGB").resize((thumb, thumb)), (i * thumb, 0))
+    return grid
+
+
+def _patch_feature_ids(names: dict | None, max_acts: np.ndarray, n: int) -> list[int]:
+    """Slider features if named, else the highest-variance live features."""
+    if names:
+        return [int(k) for k in names.keys()][:n]
+    var = max_acts.var(0)
+    return [int(i) for i in np.argsort(var)[::-1] if var[i] > 0][:n]
+
+
+def stage_patch_embeddings(out: Path, corpus, paths: list[str], seed: int, max_points: int) -> None:
+    print("\n[0] Patch embeddings")
+    labels = [_label(p) for p in paths]
+    classes = sorted(set(labels))
+    cls_to_int = {c: i for i, c in enumerate(classes)}
+    counts = {c: labels.count(c) for c in classes}
+    rows = sorted(counts.items(), key=lambda x: -x[1])
+    _write_csv(out / "class_counts.csv", ["class", "count"], [[c, n] for c, n in rows])
+
+    fig, ax = plt.subplots(figsize=(10, max(3, len(classes) * 0.22)))
+    ax.barh([c for c, _ in rows][::-1], [n for _, n in rows][::-1], color="#4c72b0")
+    ax.set_xlabel("images"); ax.set_title(f"Class distribution ({len(classes)} classes, {len(paths)} images)")
+    _save(fig, out / "class_distribution.png")
+
+    # PCA over a patch subsample, each patch colored by its parent image's class.
+    rng = np.random.default_rng(seed)
+    n = min(max_points, len(corpus.data))
+    idx = np.sort(rng.choice(len(corpus.data), size=n, replace=False))
+    from src.retrieval.patch_retrieval import l2_normalize
+    sub = l2_normalize(corpus.reader.rows(idx))
+    centered = sub - sub.mean(0)
+    _, s, vt = np.linalg.svd(centered, full_matrices=False)
+    proj = centered @ vt[:2].T
+    var_ratio = (s[:2] ** 2) / (s ** 2).sum()
+    color_ints = np.array([cls_to_int[labels[corpus.image_ids[i]]] for i in idx])
+    fig, ax = plt.subplots(figsize=(8, 7))
+    sc = ax.scatter(proj[:, 0], proj[:, 1], c=color_ints, cmap="tab20", s=3, alpha=0.4)
+    ax.set_xlabel(f"PC1 ({var_ratio[0]:.1%} var)"); ax.set_ylabel(f"PC2 ({var_ratio[1]:.1%} var)")
+    ax.set_title(f"DINOv2 patch tokens, PCA 2D (n={n} patches, colored by image class)")
+    fig.colorbar(sc, ax=ax, label="class index")
+    _save(fig, out / "patch_embeddings_pca2d.png")
+
+
+def stage_patch_features(out: Path, emb_path: Path, corpus, sae, dino, paths: list[str],
+                         names: dict | None, n_features: int, top_images: int,
+                         n_patches: int, crop_size: int) -> None:
+    print("\n[2] Patch features: activation heatmaps + top-patch montages")
+    from scripts.name_features import _aggregate_patch_activations
+    from src.naming.spatial_localization import feature_activation_grid, localize_feature_topk
+
+    max_acts, _ = _aggregate_patch_activations(emb_path, sae)
+    feats = _patch_feature_ids(names, max_acts, n_features)
+    table = []
+    for fid in feats:
+        order = np.argsort(max_acts[:, fid])[::-1][:top_images]
+        name = _feature_name(names, fid)
+
+        # Activation heatmaps: top images, original above its activation overlay.
+        fig, axes = plt.subplots(2, len(order), figsize=(2.1 * len(order), 4.6))
+        axes = np.atleast_2d(axes)
+        for col, img_idx in enumerate(order):
+            try:
+                aligned, grid = feature_activation_grid(paths[img_idx], dino, sae, fid)
+            except Exception as e:
+                print(f"  heatmap skip {paths[img_idx]}: {e}"); continue
+            axes[0, col].imshow(aligned.resize((224, 224))); axes[0, col].axis("off")
+            axes[0, col].set_title(_label(paths[img_idx])[:16], fontsize=7)
+            axes[1, col].imshow(_heatmap_overlay(aligned, grid)); axes[1, col].axis("off")
+            axes[1, col].set_title(f"max={max_acts[img_idx, fid]:.2f}", fontsize=7)
+        fig.suptitle(f"Feature {fid}: {name}", fontsize=11)
+        _save(fig, out / f"feature_{fid:05d}_heatmap.png")
+
+        # Top-patch montage (the crops the VLM actually saw when naming).
+        try:
+            localize_feature_topk(paths[int(order[0])], dino, sae, fid, n_patches, crop_size).save(
+                out / f"feature_{fid:05d}_patches.png")
+        except Exception as e:
+            print(f"  montage skip feature {fid}: {e}")
+        table.append([fid, name, _label(paths[int(order[0])]), f"{max_acts[int(order[0]), fid]:.3f}"])
+    _write_csv(out / "patch_top_features.csv",
+               ["feature_id", "name", "top1_class", "top1_max_activation"], table)
+    print(f"  wrote {len(feats)} feature heatmap panels + montages")
+
+    # Slider redundancy: cosine between decoder directions (duplicate sliders show up here).
+    dirs = sae.feature_directions(feats).cpu().numpy()
+    dirs = dirs / (np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-8)
+    sim = dirs @ dirs.T
+    labels = [f"{fid}:{_feature_name(names, fid)[:18]}" for fid in feats]
+    fig, ax = plt.subplots(figsize=(max(6, len(feats) * 0.4), max(5, len(feats) * 0.38)))
+    im = ax.imshow(sim, cmap="RdBu_r", vmin=-1, vmax=1)
+    ax.set_xticks(range(len(feats))); ax.set_xticklabels(labels, rotation=90, fontsize=7)
+    ax.set_yticks(range(len(feats))); ax.set_yticklabels(labels, fontsize=7)
+    ax.set_title("Slider decoder-direction cosine (redundancy)")
+    fig.colorbar(im, ax=ax, fraction=0.046)
+    _save(fig, out / "feature_direction_similarity.png")
+
+
+def stage_patch_retrieval(out: Path, corpus, index, sae, dino, paths: list[str],
+                          names: dict | None, n_queries: int, k: int, seed: int,
+                          steer_alpha: float) -> None:
+    print("\n[6] Patch retrieval: MaxSim examples + steering")
+    from src.retrieval.patch_retrieval import maxsim_search, steer_patches
+
+    def _open(i: int) -> Image.Image:
+        try:
+            return Image.open(paths[i]).convert("RGB")
+        except Exception:
+            return Image.new("RGB", (130, 130), "gray")
+
+    rng = np.random.default_rng(seed)
+    qids = rng.choice(corpus.n_images, size=min(n_queries, corpus.n_images), replace=False)
+    for qi in qids:
+        _, ret = maxsim_search(corpus, index, corpus.image_patches(int(qi)), k=k)
+        if not len(ret):
+            continue
+        row = _row_montage([_open(int(qi))] + [_open(int(r)) for r in ret])
+        row.save(out / f"query_{int(qi):05d}_results.png")
+    print(f"  wrote {len(qids)} MaxSim retrieval strips (query + top-{k})")
+
+    # Steering: same query, unsteered vs steered by the first slider feature.
+    if not names:
+        print("  (no feature_names.json -> skipping steering example)")
+        return
+    fid = int(next(iter(names.keys())))
+    directions = sae.feature_directions([fid]).cpu().numpy()
+    qi = int(qids[0])
+    qp = corpus.image_patches(qi)
+    _, base = maxsim_search(corpus, index, qp, k=k)
+    _, steered = maxsim_search(corpus, index, steer_patches(qp, directions, [steer_alpha]), k=k)
+    base_row = _row_montage([_open(qi)] + [_open(int(r)) for r in base])
+    steer_row = _row_montage([_open(qi)] + [_open(int(r)) for r in steered])
+    combo = Image.new("RGB", (base_row.width, base_row.height * 2 + 4), "white")
+    combo.paste(base_row, (0, 0)); combo.paste(steer_row, (0, base_row.height + 4))
+    combo.save(out / f"steering_feature_{fid:05d}.png")
+    print(f"  wrote steering comparison for feature {fid} "
+          f"({_feature_name(names, fid)}, alpha={steer_alpha})")
+
+
+def _run_patch_report(args, d: Path, m: Path, ds: str, out_root: Path,
+                      stages: dict, paths: list[str], emb_path: Path) -> None:
+    """Patch-corpus report: activation heatmaps, top-patch montages, MaxSim retrieval and
+    steering examples (the CLS embeddings/activations stages don't apply here)."""
+    print(f"\nPatch-corpus report for {ds}")
+    from src.encoders.dino_encoder import DINOEncoder
+    from src.models.sae import SparseAutoencoder
+    from src.retrieval.index import load_index
+    from src.retrieval.patch_retrieval import PatchCorpus
+
+    sae_path = args.sae_model or (m / f"{ds}_sae_best.pt")
+    sae = SparseAutoencoder.load(sae_path)
+    names_path = m / f"{ds}_feature_names.json"
+    names = json.loads(names_path.read_text()) if names_path.exists() else None
+    corpus = PatchCorpus(emb_path)
+    dino = DINOEncoder(use_patches=True)
+
+    stage_patch_embeddings(stages["00_embeddings"], corpus, paths, args.seed, args.max_projection_points)
+    stage_patch_features(stages["02_features"], emb_path, corpus, sae, dino, paths, names,
+                         args.n_feature_montages, args.montage_k, args.n_patches, args.crop_size)
+
+    index_path = d / f"{ds}_index.faiss"
+    if index_path.exists():
+        retr_dir = out_root / "06_retrieval"
+        retr_dir.mkdir(parents=True, exist_ok=True)
+        stage_patch_retrieval(retr_dir, corpus, load_index(index_path), sae, dino, paths, names,
+                              args.retrieval_queries, args.retrieval_k, args.seed, args.steer_alpha)
+    else:
+        print(f"\n[6] SKIP retrieval: no patch index at {index_path}")
+
+    stage_evaluation(stages["05_evaluation"], args.eval_json)
+    print(f"\nPatch report written under {out_root}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Generate report figures per pipeline stage.")
     ap.add_argument("--dataset", default="plantvillage_train", help="artifact prefix")
     ap.add_argument("--data-dir", type=Path, default=Path("data/processed"))
     ap.add_argument("--models-dir", type=Path, default=Path("models"))
     ap.add_argument("--eval-json", type=Path, default=None, help="metrics JSON from evaluate.py --output")
+    ap.add_argument("--sae-model", type=Path, default=None,
+                    help="Default: models/<dataset>_sae_best.pt. Enables the redundancy heatmap.")
     ap.add_argument("--output-dir", type=Path, default=None)
     ap.add_argument("--n-feature-montages", type=int, default=12)
     ap.add_argument("--montage-k", type=int, default=8)
     ap.add_argument("--max-projection-points", type=int, default=6000)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--n-patches", type=int, default=4, help="Patch heatmaps: top patches montaged per image.")
+    ap.add_argument("--crop-size", type=int, default=96, help="Patch heatmaps: crop size around each patch.")
+    ap.add_argument("--retrieval-queries", type=int, default=6, help="Patch report: example MaxSim queries to render.")
+    ap.add_argument("--retrieval-k", type=int, default=8, help="Patch report: retrieved images per query.")
+    ap.add_argument("--steer-alpha", type=float, default=4.0, help="Patch report: alpha for the steering example.")
     args = ap.parse_args()
 
     d, m, ds = args.data_dir, args.models_dir, args.dataset
@@ -311,7 +567,14 @@ def main() -> None:
         p.mkdir(parents=True, exist_ok=True)
 
     paths = json.loads((d / f"{ds}_image_paths.json").read_text())
-    embs = normalize_embeddings(np.load(d / f"{ds}_embeddings.npy").astype(np.float32))
+    emb_path = d / f"{ds}_embeddings.npy"
+
+    from src.utils.io import patch_sidecar_paths
+    if patch_sidecar_paths(emb_path)[1].exists():
+        _run_patch_report(args, d, m, ds, out_root, stages, paths, emb_path)
+        return
+
+    embs = normalize_embeddings(np.load(emb_path).astype(np.float32))
 
     acts_path = d / f"{ds}_activations.npy"
     acts = np.load(acts_path, mmap_mode="r") if acts_path.exists() else None
@@ -319,11 +582,17 @@ def main() -> None:
     names_path = m / f"{ds}_feature_names.json"
     names = json.loads(names_path.read_text()) if names_path.exists() else None
 
+    sae_path = args.sae_model or (m / f"{ds}_sae_best.pt")
+    sae = None
+    if sae_path.exists():
+        from src.models.sae import SparseAutoencoder
+        sae = SparseAutoencoder.load(sae_path)
+
     stage_embeddings(stages["00_embeddings"], embs, paths, args.seed, args.max_projection_points)
     stage_training(stages["01_training"], m / f"{ds}_sae_history.json", acts)
     if acts is not None:
         stage_features(stages["02_features"], acts, paths, names,
-                       args.n_feature_montages, args.montage_k)
+                       args.n_feature_montages, args.montage_k, sae=sae)
     else:
         print("\n[2] SKIP features: no activations on disk (run build_index.py --sae-model)")
     stage_class_directions(stages["03_class_directions"],

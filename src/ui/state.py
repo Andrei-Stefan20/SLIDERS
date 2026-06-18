@@ -5,6 +5,7 @@ import numpy as np
 
 from src.encoders.dino_encoder import DINOEncoder
 from src.models.sae import SparseAutoencoder
+from src.retrieval.patch_retrieval import PatchCorpus
 
 
 @dataclass
@@ -13,7 +14,7 @@ class AppState:
     sae: SparseAutoencoder
     index: faiss.Index
     sae_index: faiss.Index | None
-    embeddings: np.ndarray
+    embeddings: np.ndarray | None
     activations: np.ndarray | None
     image_paths: list[str]
     feature_ids: list[int]
@@ -29,3 +30,7 @@ class AppState:
 
     path_to_idx: dict[str, int] = field(default_factory=dict)
     feature_scales: np.ndarray | None = None
+
+    # Patch-level corpus: when set, retrieval uses late-interaction MaxSim instead of
+    # the CLS index, and queries are patch-token sets rather than a single CLS vector.
+    patch_corpus: PatchCorpus | None = None

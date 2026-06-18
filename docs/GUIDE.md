@@ -24,6 +24,15 @@ Useful switches: `-ExtractEmbeddings` to also re-extract embeddings first,
 `-SkipClassDirections`, and `-DryRun` to print the commands without running them.
 The steps below document each stage individually.
 
+For the **patch-level** pipeline (patch SAE + MaxSim retrieval), add `-Patches`. It
+extracts DINOv2 patch tokens (int8 by default; `-PatchDtype float16`, `-MaxPatchesPerImage 64`
+to shrink further), trains the patch SAE, names, builds the patch index, and evaluates with
+MaxSim. Class directions are skipped (CLS-only). Artifacts use the `<dataset>_patch` stem.
+
+```powershell
+.\scripts\run_pipeline.ps1 -Patches -ExtractEmbeddings
+```
+
 ## Run order
 
 0. Install environment.
@@ -122,6 +131,41 @@ data/processed/plantvillage_train_image_paths.json
 data/processed/plantvillage_val_embeddings.npy
 data/processed/plantvillage_val_image_paths.json
 ```
+
+**Patch-level (region) features.** Add `--use-patches` to extract DINOv2 patch tokens
+(256 per image) instead of the CLS token. Output is a memory-mapped
+`<dataset>_patch_embeddings.npy` plus `_patch_image_ids.npy` / `_patch_meta.json` sidecars.
+**Footprint.** The patch memmap is stored on disk (not RAM) and is the main cost. Defaults
+and knobs (≈43k images, 256 patches, 1024-d):
+
+| setting (`--patch-dtype`) | per-patch | ~total |
+| --- | --- | --- |
+| `float32`, all patches | 4 KB | ~45 GB |
+| **`float16`, all patches** (default) | 2 KB | **~22 GB** |
+| `int8`, all patches | ~1 KB | ~11 GB |
+| `int8` + `--max-patches-per-image 64` | ~1 KB | ~2.8 GB |
+| `int8` + `--max-patches-per-image 32` | ~1 KB | ~1.4 GB |
+
+Two independent knobs, combinable:
+- `--patch-dtype int8` quantizes each patch per-row to one byte plus a float32 scale (a
+  `_scales.npy` sidecar); reads are dequantized transparently everywhere (training, index,
+  naming, retrieval), so nothing downstream changes. Reconstruction error is negligible.
+- `--max-patches-per-image N` keeps the N most salient patches per image (by token norm),
+  trading a little retrieval recall for a big saving.
+
+The index itself is small regardless (IVF-PQ, ~1-2 GB). The whole pipeline detects the
+patch file automatically:
+
+```powershell
+python scripts/train_sae.py --embeddings data/processed/plantvillage_train_patch_embeddings.npy --output models/ --topk 40
+python scripts/name_features.py --embeddings data/processed/plantvillage_train_patch_embeddings.npy --image-paths data/processed/plantvillage_train_patch_image_paths.json --sae-model models/plantvillage_train_patch_sae_best.pt
+python scripts/build_index.py --embeddings data/processed/plantvillage_train_patch_embeddings.npy
+python scripts/evaluate.py --embeddings data/processed/plantvillage_train_patch_embeddings.npy --image-paths data/processed/plantvillage_train_patch_image_paths.json --index data/processed/plantvillage_train_patch_index.faiss --sae-model models/plantvillage_train_patch_sae_best.pt --query-embeddings data/processed/plantvillage_val_patch_embeddings.npy --query-image-paths data/processed/plantvillage_val_patch_image_paths.json
+```
+
+`train_sae` memory-maps files above 2 GB automatically; `build_index` builds a patch
+(late-interaction) index; `evaluate` runs the MaxSim retrieval metrics + patch steering
+faithfulness (see `docs/EVALUATION.md`).
 
 3. Train the SAE.
 

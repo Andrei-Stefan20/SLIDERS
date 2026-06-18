@@ -44,6 +44,12 @@ def main() -> None:
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--tied-weights", action="store_true")
     parser.add_argument(
+        "--mmap",
+        action="store_true",
+        help="Memory-map the embeddings instead of loading them into RAM. "
+             "Auto-enabled for files larger than 2 GB (e.g. patch-token embeddings).",
+    )
+    parser.add_argument(
         "--val-split",
         type=float,
         default=0.1,
@@ -130,6 +136,11 @@ def main() -> None:
 
     prefix = f"{dataset_stem(args.embeddings)}_"
 
+    mmap = args.mmap
+    if not mmap and args.embeddings.exists() and args.embeddings.stat().st_size > 2 * 1024**3:
+        mmap = True
+        logger.info("embeddings > 2 GB: memory-mapping enabled automatically.")
+
     train_sae(
         embeddings_path=args.embeddings,
         output_dir=args.output,
@@ -146,6 +157,7 @@ def main() -> None:
         val_split=val_split,
         patience=patience,
         dead_threshold_steps=dead_threshold_steps,
+        mmap=mmap,
     )
 
 

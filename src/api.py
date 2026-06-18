@@ -60,6 +60,12 @@ def _path_to_b64(path: str, size: int = 120) -> str | None:
 
 def _compute_scores(emb: np.ndarray) -> list[float]:
     state = _require_state()
+    if emb.ndim == 2:  # patch query: per-feature score = max over the query's patches
+        from src.retrieval.patch_retrieval import l2_normalize
+        with torch.no_grad():
+            acts = state.sae.encode(torch.from_numpy(l2_normalize(emb))).numpy()
+        per_feature = acts.max(axis=0)
+        return [float(per_feature[fid]) for fid in state.feature_ids]
     n = float(np.linalg.norm(emb))
     q = emb / n if n > 1e-8 else emb
     if state.class_directions is not None:
@@ -155,8 +161,10 @@ async def encode(file: UploadFile = File(...)):
     pil = PILImage.open(io.BytesIO(data)).convert("RGB")
     img_np = np.array(pil)
     raw_emb = service.encode_image_raw(img_np)
-    emb = service.normalize(raw_emb)
     scores = _compute_scores(raw_emb)
+    # Patch query is (P, D); flatten so the 1-D embedding schema is unchanged (the client
+    # round-trips it back and /api/retrieve reshapes). CLS query is just normalized.
+    emb = raw_emb.reshape(-1) if raw_emb.ndim == 2 else service.normalize(raw_emb)
     return {"embedding": emb.tolist(), "scores": scores}
 
 
@@ -171,6 +179,8 @@ async def retrieve(req: RetrieveRequest):
     state = _require_state()
     service = _require_service()
     emb = np.array(req.embedding, dtype=np.float32)
+    if state.patch_corpus is not None:  # un-flatten the patch-token query
+        emb = emb.reshape(state.patch_corpus.patches_per_image, -1)
     result = service.retrieve(emb, req.sliders, k=req.k)
     items = []
     for sr in result.items:
